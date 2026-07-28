@@ -13,7 +13,7 @@
     "build": "npm run build:client",
     "build:prod": "npm run build:server && npm run build:client",
     "build:server": "NODE_ENV=production nest build",
-    "build:client": "npx vite build",
+    "build:client": "npx vite build --base /heat-treatment-system/",
     "start": "tsx server/main.ts",
     "test": "jest",
     "test:watch": "jest --watch",
