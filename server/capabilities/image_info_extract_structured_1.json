@@ -1,0 +1,25 @@
+{
+  "id": "image_info_extract_structured_1",
+  "pluginKey": "@official-plugins/ai-image-to-json",
+  "pluginVersion": "1.0.2",
+  "name": "图片信息提取",
+  "description": "从图片中提取结构化信息，例如发票信息、合同信息等",
+  "icon": "https://lf3-static.bytednsdoc.com/obj/eden-cn/fzgeh7nuhfboznulog/image_to_json.svg",
+  "paramsSchema": {},
+  "formValue": {
+    "jsonStructure": [
+      {
+        "name": "",
+        "paramDescription": "",
+        "paramType": "String"
+      }
+    ],
+    "modelParams": {
+      "temperature": 0.7,
+      "maxTokens": 8192
+    }
+  },
+  "createdAt": 1770206074485,
+  "updatedAt": 1770206074485,
+  "createdBy": 7519842345098330115
+}

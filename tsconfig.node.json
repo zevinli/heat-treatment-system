@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "lib": ["ES2022"],
+    "outDir": "./dist",
+    "rootDir": ".",
+    "jsx": "react-jsx",
+    "strict": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "composite": true,
+    "declaration": true,
+    "sourceMap": false,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./client/src/*"],
+      "@client/*": ["./client/*"],
+      "@shared/*": ["./shared/*"],
+      "@lark-apaas/fullstack-nestjs-core": ["./_shims/@lark-apaas/fullstack-nestjs-core/index"],
+      "@lark-apaas/fullstack-nestjs-core/*": ["./_shims/@lark-apaas/fullstack-nestjs-core/*"]
+    }
+  },
+  "include": ["server/**/*", "shared/**/*", "_shims/**/*"],
+  "exclude": ["node_modules", "dist", "client"]
+}

@@ -1,0 +1,485 @@
+/* 热处理管理系统 - 三主题视觉设计系统 */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+/* ==================== 白天模式 (Light) ==================== */
+:root {
+  /* 核心色彩系统 */
+  --background: hsl(220 20% 98%);
+  --foreground: hsl(222 47% 11%);
+  --card: hsl(0 0% 100%);
+  --card-foreground: hsl(222 47% 11%);
+  --popover: hsl(0 0% 100%);
+  --popover-foreground: hsl(222 47% 11%);
+  
+  /* 主色调 - 深邃工业蓝 */
+  --primary: hsl(220 70% 45%);
+  --primary-foreground: hsl(0 0% 100%);
+  --primary-light: hsl(220 70% 95%);
+  --primary-dark: hsl(220 70% 35%);
+  
+  /* 辅助色 */
+  --secondary: hsl(220 30% 96%);
+  --secondary-foreground: hsl(222 47% 11%);
+  --muted: hsl(220 20% 96%);
+  --muted-foreground: hsl(220 15% 45%);
+  
+  /* 强调色 - 琥珀金 */
+  --accent: hsl(38 95% 53%);
+  --accent-foreground: hsl(222 47% 11%);
+  --accent-light: hsl(38 95% 95%);
+  
+  /* 语义色彩 */
+  --destructive: hsl(0 72% 51%);
+  --destructive-foreground: hsl(0 0% 100%);
+  --destructive-light: hsl(0 72% 97%);
+  
+  --success: hsl(142 76% 40%);
+  --success-foreground: hsl(0 0% 100%);
+  --success-light: hsl(142 76% 97%);
+  
+  --warning: hsl(38 95% 53%);
+  --warning-foreground: hsl(222 47% 11%);
+  --warning-light: hsl(38 95% 97%);
+  
+  --error: hsl(0 72% 51%);
+  --error-foreground: hsl(0 0% 100%);
+  --error-light: hsl(0 72% 97%);
+  
+  --info: hsl(220 70% 50%);
+  --info-foreground: hsl(0 0% 100%);
+  --info-light: hsl(220 70% 97%);
+  
+  /* 边框和输入 */
+  --border: hsl(220 20% 90%);
+  --input: hsl(220 20% 90%);
+  --ring: hsl(220 70% 45%);
+  
+  /* 图表色彩 */
+  --chart-1: hsl(220 70% 50%);
+  --chart-2: hsl(38 95% 53%);
+  --chart-3: hsl(142 76% 40%);
+  --chart-4: hsl(0 72% 51%);
+  --chart-5: hsl(280 65% 55%);
+  
+  /* 侧边栏 - 浅色主题 */
+  --sidebar: hsl(0 0% 100%);
+  --sidebar-foreground: hsl(222 47% 11%);
+  --sidebar-primary: hsl(220 70% 45%);
+  --sidebar-primary-foreground: hsl(0 0% 100%);
+  --sidebar-accent: hsl(220 20% 96%);
+  --sidebar-accent-foreground: hsl(222 47% 11%);
+  --sidebar-border: hsl(220 20% 90%);
+  --sidebar-ring: hsl(220 70% 45%);
+  
+  /* 特殊效果 */
+  --glass-bg: hsl(0 0% 100% / 0.8);
+  --glass-border: hsl(220 20% 90% / 0.5);
+  --shadow-color: 220 30% 20%;
+  --shadow-strength: 5%;
+  --selection-bg: hsl(220 70% 45% / 0.15);
+  --selection-fg: hsl(220 70% 35%);
+  
+  /* 字体 */
+  --font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans CN', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-serif: 'Georgia', ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+  --font-mono: 'JetBrains Mono', 'Source Code Pro', ui-monospace, monospace;
+  
+  /* 圆角系统 */
+  --radius: 0.75rem;
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.25rem;
+  --radius-2xl: 1.5rem;
+  --radius-full: 9999px;
+  
+  /* 阴影系统 */
+  --shadow-2xs: 0 1px 2px 0 rgb(0 0 0 / 0.03);
+  --shadow-xs: 0 1px 3px 0 rgb(0 0 0 / 0.04), 0 1px 2px -1px rgb(0 0 0 / 0.04);
+  --shadow-sm: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+  --shadow: 0 10px 15px -3px rgb(0 0 0 / 0.06), 0 4px 6px -4px rgb(0 0 0 / 0.06);
+  --shadow-md: 0 20px 25px -5px rgb(0 0 0 / 0.07), 0 8px 10px -6px rgb(0 0 0 / 0.07);
+  --shadow-lg: 0 25px 50px -12px rgb(0 0 0 / 0.12);
+  --shadow-xl: 0 32px 64px -12px rgb(0 0 0 / 0.15);
+  --shadow-2xl: 0 40px 80px -16px rgb(0 0 0 / 0.18);
+  
+  /* 动画 */
+  --animate-duration: 0.2s;
+  --animate-timing: cubic-bezier(0.4, 0, 0.2, 1);
+  
+  /* 间距 */
+  --spacing: 0.25rem;
+  --tracking-normal: 0em;
+}
+
+/* ==================== 夜间模式 (Dark) - 全新设计 ==================== */
+[data-theme="dark"] {
+  /* 核心色彩系统 - 深邃蓝黑背景 */
+  --background: hsl(225 25% 6%);
+  --foreground: hsl(220 20% 98%);
+  --card: hsl(225 20% 10%);
+  --card-foreground: hsl(220 20% 98%);
+  --popover: hsl(225 20% 10%);
+  --popover-foreground: hsl(220 20% 98%);
+  
+  /* 主色调 - 霓虹蓝 */
+  --primary: hsl(217 91% 60%);
+  --primary-foreground: hsl(0 0% 100%);
+  --primary-light: hsl(217 91% 15%);
+  --primary-dark: hsl(217 91% 50%);
+  
+  /* 辅助色 - 深蓝灰 */
+  --secondary: hsl(225 20% 15%);
+  --secondary-foreground: hsl(220 20% 98%);
+  --muted: hsl(225 18% 18%);
+  --muted-foreground: hsl(220 15% 55%);
+  
+  /* 强调色 - 活力橙 */
+  --accent: hsl(32 100% 55%);
+  --accent-foreground: hsl(0 0% 100%);
+  --accent-light: hsl(32 100% 15%);
+  
+  /* 语义色彩 - 霓虹风格 */
+  --destructive: hsl(0 84% 60%);
+  --destructive-foreground: hsl(0 0% 100%);
+  --destructive-light: hsl(0 84% 15%);
+  
+  --success: hsl(142 71% 45%);
+  --success-foreground: hsl(0 0% 100%);
+  --success-light: hsl(142 71% 12%);
+  
+  --warning: hsl(38 92% 50%);
+  --warning-foreground: hsl(0 0% 100%);
+  --warning-light: hsl(38 92% 12%);
+  
+  --error: hsl(0 84% 60%);
+  --error-foreground: hsl(0 0% 100%);
+  --error-light: hsl(0 84% 15%);
+  
+  --info: hsl(199 89% 48%);
+  --info-foreground: hsl(0 0% 100%);
+  --info-light: hsl(199 89% 12%);
+  
+  /* 边框和输入 - 微光边框 */
+  --border: hsl(225 15% 18%);
+  --input: hsl(225 15% 15%);
+  --ring: hsl(217 91% 60%);
+  
+  /* 图表色彩 - 霓虹调色板 */
+  --chart-1: hsl(217 91% 60%);
+  --chart-2: hsl(32 100% 55%);
+  --chart-3: hsl(142 71% 50%);
+  --chart-4: hsl(0 84% 60%);
+  --chart-5: hsl(280 65% 60%);
+  
+  /* 侧边栏 - 渐变深蓝 */
+  --sidebar: hsl(225 25% 8%);
+  --sidebar-foreground: hsl(220 20% 92%);
+  --sidebar-primary: hsl(32 100% 55%);
+  --sidebar-primary-foreground: hsl(0 0% 100%);
+  --sidebar-accent: hsl(225 20% 16%);
+  --sidebar-accent-foreground: hsl(220 20% 98%);
+  --sidebar-border: hsl(225 15% 20%);
+  --sidebar-ring: hsl(217 91% 60%);
+  
+  /* 特殊效果 - 玻璃拟态 */
+  --glass-bg: hsl(225 20% 10% / 0.7);
+  --glass-border: hsl(225 15% 25% / 0.4);
+  --shadow-color: 220 40% 2%;
+  --shadow-strength: 40%;
+  --selection-bg: hsl(217 91% 60% / 0.3);
+  --selection-fg: hsl(217 91% 80%);
+}
+
+/* ==================== 护眼模式 (Eye Care) ==================== */
+[data-theme="eye-care"] {
+  /* 核心色彩系统 - 暖色背景 */
+  --background: hsl(40 30% 94%);
+  --foreground: hsl(30 25% 15%);
+  --card: hsl(40 25% 97%);
+  --card-foreground: hsl(30 25% 15%);
+  --popover: hsl(40 25% 97%);
+  --popover-foreground: hsl(30 25% 15%);
+  
+  /* 主色调 - 深棕橙 */
+  --primary: hsl(25 60% 40%);
+  --primary-foreground: hsl(40 30% 97%);
+  --primary-light: hsl(25 60% 92%);
+  --primary-dark: hsl(25 60% 30%);
+  
+  /* 辅助色 */
+  --secondary: hsl(40 20% 90%);
+  --secondary-foreground: hsl(30 25% 15%);
+  --muted: hsl(40 20% 90%);
+  --muted-foreground: hsl(30 15% 45%);
+  
+  /* 强调色 - 暖橙 */
+  --accent: hsl(35 80% 50%);
+  --accent-foreground: hsl(40 30% 97%);
+  --accent-light: hsl(35 80% 92%);
+  
+  /* 语义色彩 */
+  --destructive: hsl(0 60% 50%);
+  --destructive-foreground: hsl(40 30% 97%);
+  --destructive-light: hsl(0 60% 95%);
+  
+  --success: hsl(140 50% 38%);
+  --success-foreground: hsl(40 30% 97%);
+  --success-light: hsl(140 50% 95%);
+  
+  --warning: hsl(35 80% 48%);
+  --warning-foreground: hsl(40 30% 97%);
+  --warning-light: hsl(35 80% 95%);
+  
+  --error: hsl(0 60% 50%);
+  --error-foreground: hsl(40 30% 97%);
+  --error-light: hsl(0 60% 95%);
+  
+  --info: hsl(200 50% 45%);
+  --info-foreground: hsl(40 30% 97%);
+  --info-light: hsl(200 50% 95%);
+  
+  /* 边框和输入 */
+  --border: hsl(40 20% 85%);
+  --input: hsl(40 20% 85%);
+  --ring: hsl(25 60% 40%);
+  
+  /* 图表色彩 - 暖色调 */
+  --chart-1: hsl(25 60% 45%);
+  --chart-2: hsl(35 80% 50%);
+  --chart-3: hsl(140 50% 40%);
+  --chart-4: hsl(0 60% 50%);
+  --chart-5: hsl(280 40% 50%);
+  
+  /* 侧边栏 */
+  --sidebar: hsl(30 25% 20%);
+  --sidebar-foreground: hsl(40 20% 90%);
+  --sidebar-primary: hsl(35 80% 50%);
+  --sidebar-primary-foreground: hsl(40 30% 97%);
+  --sidebar-accent: hsl(30 25% 28%);
+  --sidebar-accent-foreground: hsl(40 20% 95%);
+  --sidebar-border: hsl(30 25% 28%);
+  --sidebar-ring: hsl(35 80% 50%);
+  
+  /* 特殊效果 */
+  --glass-bg: hsl(40 25% 97% / 0.85);
+  --glass-border: hsl(40 20% 85% / 0.5);
+  --shadow-color: 30 20% 20%;
+  --shadow-strength: 4%;
+  --selection-bg: hsl(25 60% 40% / 0.15);
+  --selection-fg: hsl(25 60% 30%);
+}
+
+/* ==================== Tailwind 主题映射 ==================== */
+@theme inline {
+  /* 颜色映射 */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-light: var(--primary-light);
+  --color-primary-dark: var(--primary-dark);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-light: var(--accent-light);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive-light: var(--destructive-light);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-success-light: var(--success-light);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning-light: var(--warning-light);
+  --color-error: var(--error);
+  --color-error-foreground: var(--error-foreground);
+  --color-error-light: var(--error-light);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-info-light: var(--info-light);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* 字体 */
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-serif: var(--font-serif);
+
+  /* 圆角 */
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --radius-2xl: var(--radius-2xl);
+  --radius-full: var(--radius-full);
+
+  /* 阴影 */
+  --shadow-2xs: var(--shadow-2xs);
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow: var(--shadow);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
+  --shadow-2xl: var(--shadow-2xl);
+}
+
+/* ==================== 全局样式优化 ==================== */
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* 选中文本样式 */
+::selection {
+  background: var(--selection-bg);
+  color: var(--selection-fg);
+}
+
+/* 滚动条样式 - 适配多主题 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+  opacity: 0.5;
+}
+
+/* 玻璃拟态效果 */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+}
+
+/* 渐变背景 - 适配多主题 */
+.gradient-primary {
+  background: linear-gradient(135deg, var(--primary) 0%, hsl(from var(--primary) h s calc(l + 10%)) 100%);
+}
+
+.gradient-success {
+  background: linear-gradient(135deg, var(--success) 0%, hsl(from var(--success) h s calc(l + 10%)) 100%);
+}
+
+.gradient-warning {
+  background: linear-gradient(135deg, var(--warning) 0%, hsl(from var(--warning) h s calc(l + 10%)) 100%);
+}
+
+.gradient-destructive {
+  background: linear-gradient(135deg, var(--destructive) 0%, hsl(from var(--destructive) h s calc(l + 10%)) 100%);
+}
+
+/* 悬停提升效果 */
+.hover-lift {
+  transition: transform 0.2s var(--animate-timing), box-shadow 0.2s var(--animate-timing);
+}
+
+.hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+/* 卡片光效 */
+.card-glow {
+  position: relative;
+}
+
+.card-glow::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, hsl(from var(--primary) h s l / 0.2), transparent 50%);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* 文本渐变 */
+.text-gradient {
+  background: linear-gradient(135deg, var(--primary) 0%, hsl(from var(--primary) h s calc(l + 10%)) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ==================== 动画 ==================== */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+@keyframes shimmer {
+  100% { left: 100%; }
+}
+
+@keyframes statusPulse {
+  0% { transform: scale(1); opacity: 0.4; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+@keyframes skeleton-loading {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* 主题切换动画 */
+.theme-transition {
+  transition: background-color 0.3s ease, 
+              color 0.3s ease, 
+              border-color 0.3s ease, 
+              box-shadow 0.3s ease;
+}

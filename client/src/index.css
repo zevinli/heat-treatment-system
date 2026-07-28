@@ -1,0 +1,23 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "./tailwind-theme.css";
+@import "./typography.css";
+
+html,
+html *,
+html *::before,
+html *::after {
+  transition: background-color 0.3s ease, 
+              border-color 0.3s ease, 
+              color 0.3s ease,
+              fill 0.3s ease,
+              stroke 0.3s ease,
+              box-shadow 0.3s ease;
+}
+
+html .no-theme-transition,
+html .no-theme-transition *,
+html .no-theme-transition *::before,
+html .no-theme-transition *::after {
+  transition: none !important;
+}

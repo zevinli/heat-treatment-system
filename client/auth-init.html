@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>妙搭 - 系统初始化</title>
+  <style>
+    body { font-family: system-ui; display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #f5f5f5; }
+    .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.1); text-align: center; max-width: 400px; }
+    button { padding: 12px 24px; font-size: 16px; border: none; border-radius: 8px; cursor: pointer; margin: 8px; }
+    .btn-admin { background: #2563eb; color: white; }
+    .btn-operator { background: #16a34a; color: white; }
+    h1 { color: #1e293b; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🔥 热处理收发货管理系统</h1>
+    <p>选择登录账户进入系统：</p>
+    <button class="btn-admin" onclick="login('1','admin','系统管理员','1','系统管理员')">系统管理员 (admin)</button>
+    <button class="btn-operator" onclick="login('2','shouhuo','收货员','2','收货员')">收货员 (shouhuo)</button>
+    <button class="btn-operator" onclick="login('3','fahuo','发货员','3','发货员')">发货员 (fahuo)</button>
+    <button class="btn-operator" style="background:#9333ea" onclick="login('4','caiwu','财务','4','财务人员')">财务 (caiwu)</button>
+    <p style="font-size:12px;color:#999;margin-top:24px">点击后自动填写认证信息并跳转主系统</p>
+  </div>
+  <script>
+    function login(id, username, name, roleId, roleName) {
+      var user = {id:id,username:username,name:name,roleId:roleId,roleName:roleName,department:'技术部'};
+      localStorage.setItem('__global_heat_user_info', JSON.stringify(user));
+      localStorage.setItem('userId', id);
+      localStorage.setItem('userName', name);
+      localStorage.setItem('userRole', roleId);
+      localStorage.setItem('currentOrgCode', 'DEFAULT');
+      localStorage.setItem('currentOrgId', '3f2b50e4-d490-401b-81ad-33a2320797a3');
+      localStorage.setItem('currentOrgName', '\u9ed8\u8ba4\u7ec4\u7ec7');
+      window.location.href = '/';
+    }
+  </script>
+</body>
+</html>

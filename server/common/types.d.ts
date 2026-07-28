@@ -1,0 +1,14 @@
+// Extend Express Request to include properties set by tenant middleware
+declare namespace Express {
+  interface Request {
+    userContext?: {
+      userId?: string;
+      userName?: string;
+      orgCode?: string;
+      userRole?: string;
+      permissions?: string[];
+    };
+    organizationId?: string;
+    __platform_data__?: Record<string, any>;
+  }
+}

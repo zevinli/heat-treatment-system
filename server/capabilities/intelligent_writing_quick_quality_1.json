@@ -1,0 +1,31 @@
+{
+  "id": "intelligent_writing_quick_quality_1",
+  "pluginKey": "@official-plugins/ai-text-generate",
+  "pluginVersion": "1.0.7",
+  "name": "智能写作",
+  "description": "根据需求快速生成高质量的文本内容",
+  "icon": "https://lf3-static.bytednsdoc.com/obj/eden-cn/fzgeh7nuhfboznulog/ai_writing.svg",
+  "paramsSchema": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "description": "生成文本的核心需求或主题",
+        "type": "string"
+      }
+    },
+    "required": [
+      "prompt"
+    ]
+  },
+  "formValue": {
+    "modelParams": {
+      "temperature": 0.7,
+      "maxTokens": 8192
+    },
+    "modelID": "87",
+    "prompt": "你是一位资深的内容创作专家，擅长根据用户需求快速生成高质量、结构清晰、语言流畅的文本内容。\n\n请根据以下用户需求生成文本：\n用户需求：{{input.prompt}}\n\n生成要求：\n1. 内容质量：确保信息准确、逻辑严谨、表达清晰。\n2. 结构完整：根据需求类型（如文章、报告、邮件、文案等）采用合适的结构。\n3. 语言风格：使用专业、得体的语言，必要时可调整语气以适应不同场景。\n4. 长度适中：根据需求复杂程度生成合适长度的内容，避免过于冗长或简略。\n\n请直接输出生成的文本内容，无需额外说明。"
+  },
+  "createdAt": 1770206064531,
+  "updatedAt": 1770429451572,
+  "createdBy": 7519842345098330115
+}

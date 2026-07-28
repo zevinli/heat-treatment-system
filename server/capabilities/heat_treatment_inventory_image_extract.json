@@ -1,0 +1,72 @@
+{
+  "id": "heat_treatment_inventory_image_extract",
+  "pluginKey": "@official-plugins/ai-image-to-json",
+  "pluginVersion": "1.0.3",
+  "name": "热处理收发货管理系统图片信息提取",
+  "description": "用于热处理收发货管理系统中从入库产品图片中提取结构化信息，包括产品名称、材质、工艺、工件编号、单位、技术要求等字段，实现入库登记时快速识别产品信息。",
+  "icon": "",
+  "paramsSchema": {
+    "type": "object",
+    "properties": {
+      "images": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array",
+        "format": "plugin-image-url",
+        "description": "待解析的入库产品图片"
+      },
+      "prompt": {
+        "type": "string",
+        "description": "额外的图片识别要求或说明"
+      }
+    },
+    "required": [
+      "images"
+    ]
+  },
+  "formValue": {
+    "prompt": "你是一位专业的工业图像识别专家，专注于热处理行业的产品信息提取。请从提供的入库产品图片中，准确识别并提取以下结构化信息：\n\n{{input.prompt}}\n\n请严格按以下 JSON 格式返回，不要包含 markdown 代码块标记或任何其他内容：\n{\n  \"产品名称\": \"产品具体名称\",\n  \"材质\": \"材料类型\",\n  \"工艺\": \"热处理或加工工艺\",\n  \"工件编号\": \"工件唯一编号\",\n  \"单位\": \"计量单位\",\n  \"技术要求\": \"技术规格和要求\"\n}\n\n提取要求：\n1. 准确性：确保信息准确可靠，如有不确定请明确标注\n2. 完整性：尽可能提取所有字段信息\n3. 专业性：使用行业标准术语\n4. 结构化：严格按照指定格式返回",
+    "images": "{{input.images}}",
+    "jsonStructure": [
+      {
+        "name": "产品名称",
+        "paramDescription": "产品的具体名称",
+        "paramType": "String"
+      },
+      {
+        "name": "材质",
+        "paramDescription": "产品所使用的材料",
+        "paramType": "String"
+      },
+      {
+        "name": "工艺",
+        "paramDescription": "热处理或加工工艺",
+        "paramType": "String"
+      },
+      {
+        "name": "工件编号",
+        "paramDescription": "工件的唯一编号",
+        "paramType": "String"
+      },
+      {
+        "name": "单位",
+        "paramDescription": "产品的计量单位",
+        "paramType": "String"
+      },
+      {
+        "paramType": "String",
+        "name": "技术要求",
+        "paramDescription": "产品的技术规格和要求"
+      }
+    ],
+    "modelID": "88",
+    "modelParams": {
+      "maxTokens": 8192,
+      "temperature": 0.5
+    }
+  },
+  "createdAt": 1770430735005,
+  "updatedAt": 1770430735005,
+  "createdBy": 7519842345098330115
+}
