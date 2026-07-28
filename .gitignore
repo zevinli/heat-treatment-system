@@ -60,3 +60,9 @@ pnpm-lock.yaml
 .swc
 .agent/
 .npm_cache
+.env
+.vite/
+.env
+.vite/
+.env
+.vite/
