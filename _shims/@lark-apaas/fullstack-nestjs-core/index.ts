@@ -5,7 +5,6 @@ import { join } from 'path';
 // ===== configureApp =====
 export async function configureApp(app: INestApplication, _options?: { disableSwagger?: boolean }): Promise<void> {
   app.enableCors({ origin: true, credentials: true });
-  
   const expressApp = app.getHttpAdapter().getInstance();
   const express = require('express');
   expressApp.use(express.static(join(process.cwd(), 'dist/client')));
@@ -27,39 +26,52 @@ export const CanRole = (...roles: string[]) => SetMetadata('roles', roles);
 // ===== CapabilityService =====
 @Injectable()
 export class CapabilityService {
-  load(_capabilityId: string): { call: (method: string, params?: Record<string, unknown>) => Promise<any> } {
+  load(_capabilityId: string) {
     return {
       call: async (method: string, _params?: Record<string, unknown>) => {
         console.log('[CapabilityService] Calling', method);
-        return { success: false, message: 'Capability service not configured' };
+        return { success: false };
       },
     };
   }
-  async runCapability(capabilityId: string, _params?: Record<string, unknown>): Promise<any> {
-    console.log('[CapabilityService] Running:', capabilityId);
-    return { success: false, message: 'Capability service not configured' };
+  async runCapability(capabilityId: string, _params?: Record<string, unknown>) {
+    return { success: false };
   }
 }
 
-// ===== Database factory: 自动选择 PostgreSQL 或 PGlite =====
+// ===== Database factory =====
 function createDb() {
-  // Railway / 生产环境: 用 DATABASE_URL 连接真实 PostgreSQL
   const databaseUrl = process.env.DATABASE_URL || process.env.SUDA_DATABASE_URL;
 
   if (databaseUrl) {
-    console.log('[DB] Using real PostgreSQL:', databaseUrl.replace(/\/\/.*@/, '//***@'));
-    const postgres = require('postgres');
-    const { drizzle } = require('drizzle-orm/postgres-js');
-    const client = postgres(databaseUrl, { max: 10 });
-    return drizzle(client);
+    try {
+      const masked = databaseUrl.replace(/\/\/.*@/, '//***@');
+      console.log('[DB] Connecting to PostgreSQL:', masked);
+      const postgres = require('postgres');
+      const { drizzle } = require('drizzle-orm/postgres-js');
+      const client = postgres(databaseUrl, {
+        max: 5,
+        idle_timeout: 20,
+        connect_timeout: 10,
+      });
+      return drizzle(client);
+    } catch (err: any) {
+      console.error('[DB] PostgreSQL connection failed:', err.message);
+      throw err;
+    }
   }
 
-  // 本地开发: 用 PGlite（内存 PostgreSQL）
-  console.log('[DB] Using PGlite (in-memory)');
-  const { PGlite } = require('@electric-sql/pglite');
-  const { drizzle } = require('drizzle-orm/pglite');
-  const pgClient = new PGlite(join(process.cwd(), 'data'));
-  return drizzle(pgClient);
+  // 本地开发用 PGlite（不是回退方案，只在无 DATABASE_URL 时）
+  try {
+    console.log('[DB] Using PGlite (local dev)');
+    const { PGlite } = require('@electric-sql/pglite');
+    const { drizzle } = require('drizzle-orm/pglite');
+    const pgClient = new PGlite(join(process.cwd(), 'data'));
+    return drizzle(pgClient);
+  } catch (err: any) {
+    console.error('[DB] PGlite init failed:', err.message);
+    throw new Error('DATABASE_URL is not set and PGlite failed. Please add PostgreSQL in Railway.');
+  }
 }
 
 // ===== PlatformModule =====
