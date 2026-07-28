@@ -12,14 +12,14 @@ import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-    abortOnError: process.env.NODE_ENV !== 'development',
+    abortOnError: false,
   });
   await configureApp(app, { 
     disableSwagger: true,
   });
   const logger = new Logger('Bootstrap');
-  const host = process.env.SERVER_HOST || 'localhost';
-  const port = Number(process.env.SERVER_PORT || '3000');
+  const host = '0.0.0.0';
+  const port = Number(process.env.PORT || process.env.SERVER_PORT || '3000');
 
   // 注册视图引擎, 渲染 client 目录下的 html 文件
   app.setBaseViewsDir(join(process.cwd(), 'dist/client'));
