@@ -82,6 +82,7 @@ import {
   Menu,
   X,
   Command,
+  ExternalLink,
   SwitchCamera,
 } from "lucide-react";
 import { useCurrentUserProfile } from "@lark-apaas/client-toolkit/hooks/useCurrentUserProfile";
@@ -95,6 +96,7 @@ import ErrorBoundary from "./ErrorBoundary";
 import { DataProvider } from "@/data/DataContext";
 import { useData } from "@/data/DataContext";
 import { useTenant } from "@/contexts/TenantContext";
+import { FeishuContextButton, FeishuGlobalDropdown } from "@/components/FeishuLinkButton";
 
 // ==================== 导航配置 - 优化后的扁平结构 ====================
 
@@ -778,6 +780,16 @@ const Header = ({ pathname }: { pathname: string }) => {
 
 // 页面标题组件
 const PageTitle = ({ pathname }: { pathname: string }) => {
+  const pageMatch = (() => {
+    const allItems = [
+      ...mainNavItems,
+      ...businessNavItems,
+      ...analyticsNavItems,
+      ...systemNavItems.flatMap(i => i.children || [i]),
+    ];
+    return allItems.find(i => i.path === pathname || (pathname !== "/" && pathname.startsWith(i.path)));
+  })();
+  
   const getPageTitle = () => {
     const allItems = [
       ...mainNavItems,
@@ -795,7 +807,10 @@ const PageTitle = ({ pathname }: { pathname: string }) => {
 
   return (
     <div className="px-4 sm:px-6 py-4 border-b border-border/40 bg-background/50">
-      <h1 className="text-2xl font-bold text-foreground tracking-tight">{getPageTitle()}</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-foreground tracking-tight">{getPageTitle()}</h1>
+        <FeishuContextButton pathname={pathname} />
+      </div>
     </div>
   );
 };
