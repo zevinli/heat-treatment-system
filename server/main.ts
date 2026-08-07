@@ -18,7 +18,7 @@ async function bootstrap() {
     disableSwagger: true,
   });
   const logger = new Logger('Bootstrap');
-  const host = '0.0.0.0';
+  const host = process.env.SERVER_HOST || '127.0.0.1';
   const port = Number(process.env.PORT || process.env.SERVER_PORT || '3000');
 
   // 注册视图引擎, 渲染 client 目录下的 html 文件

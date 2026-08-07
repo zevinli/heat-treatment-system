@@ -1,4 +1,5 @@
 import { Injectable, Inject, Logger, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { BitableSyncService } from '../feishu/bitable-sync.service';
 import { eq, and, desc, sql, inArray, ne } from 'drizzle-orm';
 import {
   DRIZZLE_DATABASE,
@@ -25,6 +26,7 @@ export class ReconciliationService {
 
   constructor(
     @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    private readonly bitableSyncService?: BitableSyncService,
   ) {}
 
   // 状态流转规则定义
@@ -195,6 +197,11 @@ export class ReconciliationService {
         status: 'confirmed',
       })
       .returning();
+
+    // 同步到飞书多维表格（异步，不阻塞主流程）
+    this.syncToFeishuReconciliation(reconciliation, month, data).catch(err =>
+      this.logger.warn(`飞书同步对账失败：${err.message}`),
+    );
 
     // 创建明细并锁定出库单
     for (const order of outboundOrders) {
@@ -961,5 +968,20 @@ export class ReconciliationService {
       receivedAmount: centsToYuan(summary.receivedAmount),
       unReceivedAmount: centsToYuan(summary.totalAmount - summary.receivedAmount),
     };
+  }
+
+  private async syncToFeishuReconciliation(reconciliation: any, month: string, data: any) {
+    if (!this.bitableSyncService) return;
+    const paymentStatus = reconciliation.unreceivedAmount === 0 ? '已结清'
+      : reconciliation.receiptAmount > 0 ? '部分回款' : '未回款';
+
+    await this.bitableSyncService.syncReconciliation({
+      date: month,
+      customerName: data.customerName,
+      outboundAmount: reconciliation.totalAmount || 0,
+      invoicedAmount: reconciliation.invoiceAmount || 0,
+      receivedAmount: reconciliation.receiptAmount || 0,
+      paymentStatus,
+    });
   }
 }

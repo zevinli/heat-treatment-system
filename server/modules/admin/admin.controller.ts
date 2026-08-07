@@ -33,4 +33,42 @@ export class AdminController {
   ) {
     return this.adminService.getTrends(days ? parseInt(days, 10) : 7);
   }
+
+  @Get('backup')
+  async backupDatabase() {
+    const { execSync } = require('child_process');
+    const fs = require('fs');
+    const path = require('path');
+
+    const backupDir = path.join(process.cwd(), 'backups');
+    if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `heat_treatment_${timestamp}.sql.gz`;
+    const filepath = path.join(backupDir, filename);
+
+    const dbUrl = process.env.DATABASE_URL;
+    if (!dbUrl) {
+      return { success: false, message: 'DATABASE_URL 未配置' };
+    }
+
+    try {
+      execSync(`pg_dump "${dbUrl}" --clean --if-exists --no-owner | gzip > "${filepath}"`, {
+        timeout: 60000,
+        stdio: 'pipe',
+      });
+      const stats = fs.statSync(filepath);
+      return {
+        success: true,
+        message: '备份完成',
+        file: filename,
+        size: stats.size,
+        sizeFormatted: `${(stats.size / 1024).toFixed(1)} KB`,
+      };
+    } catch (err) {
+      return { success: false, message: '备份失败: ' + err.message };
+    }
+  }
+
+
 }

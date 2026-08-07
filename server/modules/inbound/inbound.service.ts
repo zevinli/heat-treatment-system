@@ -1,4 +1,5 @@
 import { Injectable, Inject, Logger, BadRequestException, NotFoundException, ConflictException } from '@nestjs/common';
+import { BitableSyncService } from '../feishu/bitable-sync.service';
 import { eq, and, desc, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import {
@@ -30,6 +31,7 @@ export class InboundService {
 
   constructor(
     @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    private readonly bitableSyncService?: BitableSyncService,
   ) {}
 
   // 获取所有入库单
@@ -272,19 +274,33 @@ export class InboundService {
         remark: `入库单创建：${order.inboundNo}`,
       });
 
-      // 更新产品累计入库数量
+      // 更新产品累计入库数量（带乐观锁）
+      const [currentProduct] = await this.db
+        .select({ version: productTable.version })
+        .from(productTable)
+        .where(eq(productTable.id, detail.productId));
+      
       await this.db
         .update(productTable)
         .set({
           inboundQuantity: sql`${productTable.inboundQuantity} + ${detail.quantity}`,
           inboundWeight: sql`${productTable.inboundWeight} + ${detail.weight}`,
           inboundDate: data.inboundDate,
+          version: sql`${productTable.version} + 1`,
         })
-        .where(eq(productTable.id, detail.productId));
+        .where(and(
+          eq(productTable.id, detail.productId),
+          eq(productTable.version, currentProduct?.[0]?.version || 0)
+        ));
     }
 
     // 更新客户入库统计
     await this.updateCustomerInboundStats(data.customerId, data.inboundDate);
+
+    // 同步到飞书多维表格（异步，不阻塞主流程）
+    this.syncToFeishuInbound(order, data).catch(err =>
+      this.logger.warn(`飞书同步来货登记失败：${err.message}`),
+    );
 
     // 记录操作日志
     await this.db.insert(operationLogTable).values({
@@ -723,5 +739,21 @@ export class InboundService {
       .orderBy(desc(operationLogTable.createdAt));
 
     return logs;
+  }
+
+  private async syncToFeishuInbound(order: any, data: any) {
+    if (!this.bitableSyncService) return;
+    for (const detail of data.details) {
+      await this.bitableSyncService.syncInbound({
+        orderId: order.inboundNo,
+        customerName: data.customerName,
+        productName: detail.productName,
+        quantity: detail.quantity,
+        weight: detail.weight,
+        createdAt: data.inboundDate,
+        createdBy: data.creator,
+        status: '待处理',
+      });
+    }
   }
 }

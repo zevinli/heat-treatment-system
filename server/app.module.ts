@@ -7,6 +7,7 @@ import { PlatformModule } from '../_shims/@lark-apaas/fullstack-nestjs-core/inde
 
 import { GlobalExceptionFilter } from './common/filters/exception.filter';
 import { ViewModule } from './modules/view/view.module';
+import { FeishuModule } from './modules/feishu/feishu.module';
 import { CustomerModule } from './modules/customer/customer.module';
 import { ProductModule } from './modules/product/product.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
@@ -31,7 +32,7 @@ import { AuthMiddleware } from './common/middleware/auth.middleware';
     // Place all business modules here.Do NOT add fallback modules here.
     // 租户模块需要最先加载，用于中间件拦截和上下文设置
     TenantModule,
-    CustomerModule,
+    FeishuModule,    CustomerModule,
     ProductModule,
     InventoryModule,
     OutboundModule,

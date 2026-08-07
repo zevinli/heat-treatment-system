@@ -218,6 +218,8 @@ export const product = pgTable("product", {
   updatedBy: userProfile("_updated_by"),
   stockWeight: doublePrecision("stock_weight").default(0),
   archivedAt: customTimestamptz('archived_at'),
+  externalCode: varchar("external_code", { length: 255 }),
+  barcode: varchar({ length: 255 }),
   archivedReason: text("archived_reason"),
   version: integer().default(1).notNull(),
   deletedAt: customTimestamptz('deleted_at'),
@@ -471,6 +473,8 @@ export const outboundOrder = pgTable("outbound_order", {
   totalAmount: doublePrecision("total_amount").default(0),
   totalQuantity: integer("total_quantity").default(0),
   totalWeight: doublePrecision("total_weight").default(0),
+  weight: doublePrecision().default(0),
+  unitPriceColumn: doublePrecision("unit_price").default(0),
   status: varchar({ length: 255 }).default('pending_reconciliation'),
   // System field: Creation time (auto-filled, do not modify)
   createdAt: customTimestamptz('_created_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
@@ -612,6 +616,8 @@ export const organization = pgTable("organization", {
   contactPhone: varchar("contact_phone", { length: 255 }),
   contactEmail: varchar("contact_email", { length: 255 }),
   description: text(),
+  feishuConfig: jsonb("feishu_config"),
+  subdomain: varchar({ length: 255 }),
   logoUrl: text("logo_url"),
   isActive: boolean("is_active").default(true),
   // System field: Creation time (auto-filled, do not modify)

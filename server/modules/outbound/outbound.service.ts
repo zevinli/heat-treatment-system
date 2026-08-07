@@ -1,4 +1,5 @@
 import { Injectable, Inject, Logger, BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { BitableSyncService } from '../feishu/bitable-sync.service';
 import { eq, and, gte, lte, desc, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import {
@@ -54,6 +55,7 @@ export class OutboundService {
 
   constructor(
     @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    private readonly bitableSyncService?: BitableSyncService,
   ) {}
 
   // 获取所有出库单
@@ -368,6 +370,11 @@ export class OutboundService {
         await this.handleCloseOrder(detail.productId, data.customerId, order.id, order.outboundNo);
       }
     }
+
+    // 同步到飞书多维表格（异步，不阻塞主流程）
+    this.syncToFeishuOutbound(order, data).catch(err =>
+      this.logger.warn(`飞书同步发货记录失败：${err.message}`),
+    );
 
     // 记录操作日志
     await this.db.insert(operationLogTable).values({
@@ -927,7 +934,7 @@ export class OutboundService {
 
   // 获取出库单统计
   async getStats(startDate?: string, endDate?: string) {
-    const conditions = [eq(outboundOrder.status, 'pending_reconciliation')];
+    const conditions = [eq(outboundOrder.status, 'active')];
     
     if (startDate) {
       conditions.push(sql`${outboundOrder.outboundDate} >= ${new Date(startDate)}`);
@@ -963,5 +970,21 @@ export class OutboundService {
       .orderBy(desc(operationLogTable.createdAt));
 
     return logs;
+  }
+
+  private async syncToFeishuOutbound(order: any, data: any) {
+    if (!this.bitableSyncService) return;
+    for (const detail of data.details) {
+      await this.bitableSyncService.syncOutbound({
+        orderId: order.outboundNo,
+        customerName: data.customerName,
+        productName: detail.productName,
+        quantity: detail.quantity,
+        weight: detail.weight,
+        batchNo: detail.batchNo || detail.batchSelections?.map((b: any) => b.batchNo).join(',') || '',
+        createdAt: data.outboundDate,
+        status: '部分发货',
+      });
+    }
   }
 }
