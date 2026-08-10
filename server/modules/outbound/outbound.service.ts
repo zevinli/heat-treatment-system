@@ -22,6 +22,7 @@ import {
   inboundDetailTable,
   outboundBatchDetailTable,
   operationLogTable,
+  customer,
 } from '../../database/schema';
 import { yuanToCents } from '../../common/utils/currency';
 import { checkUndoable } from '../../common/utils/undo-check.util';
@@ -194,6 +195,29 @@ export class OutboundService {
     totalWeight: number;
     details: Array<OutboundDetailWithBatch>;
   }) {
+    // 自动从 details 计算总计（当前端未传或为 0/NaN 时）
+    const totalAmount = data.totalAmount && !isNaN(data.totalAmount) && data.totalAmount > 0
+      ? data.totalAmount
+      : data.details.reduce((sum, d) => sum + ((d.unitPrice || 0) * (d.quantity || 0)), 0);
+    const totalQuantity = data.totalQuantity && !isNaN(data.totalQuantity) && data.totalQuantity > 0
+      ? data.totalQuantity
+      : data.details.reduce((sum, d) => sum + (d.quantity || 0), 0);
+    const totalWeight = data.totalWeight && !isNaN(data.totalWeight) && data.totalWeight > 0
+      ? data.totalWeight
+      : data.details.reduce((sum, d) => sum + (d.weight || 0), 0);
+
+    // 自动通过 customerCode 查找 customerId（若未传）
+    let customerId = data.customerId;
+    if (!customerId && data.customerCode) {
+      const [cust] = await this.db
+        .select({ id: customer.id })
+        .from(customer)
+        .where(eq(customer.code, data.customerCode))
+        .limit(1);
+      if (cust) customerId = cust.id;
+    }
+    if (!customerId) throw new BadRequestException('客户不存在或未提供客户ID');
+
     // 自动生成或验证出库单号
     const outboundNo = data.outboundNo || await this.generateOutboundNo();
     
@@ -209,14 +233,14 @@ export class OutboundService {
     }
 
     // 计算金额转分
-    const totalAmountCents = yuanToCents(data.totalAmount);
+    const totalAmountCents = yuanToCents(totalAmount);
 
     // 创建出库单
     const orderResult = await this.db
       .insert(outboundOrder)
       .values({
         outboundNo,
-        customerId: data.customerId,
+        customerId,
         customerName: data.customerName,
         customerCode: data.customerCode,
         outboundDate: data.outboundDate,
@@ -225,9 +249,9 @@ export class OutboundService {
         transporter: data.transporter || null,
         plateNumber: data.plateNumber || null,
         driver: data.driver || null,
-        totalAmount: data.totalAmount,
-        totalQuantity: data.totalQuantity,
-        totalWeight: data.totalWeight,
+        totalAmount,
+        totalQuantity,
+        totalWeight,
         totalAmountCents,
         status: 'pending_reconciliation',
         lockStatus: 'unlocked',
@@ -237,7 +261,19 @@ export class OutboundService {
     const order = orderResult[0];
 
     // 创建明细并扣减库存（按批次）
-    for (const detail of data.details) {
+    for (const rawDetail of data.details) {
+      // 自动通过 productCode 查找 productId（若未传）
+      let productId = (rawDetail as any).productId;
+      if (!productId && (rawDetail as any).productCode) {
+        const [prod] = await this.db
+          .select({ id: product.id })
+          .from(product)
+          .where(eq(product.code, (rawDetail as any).productCode))
+          .limit(1);
+        if (prod) productId = prod.id;
+      }
+      if (!productId) throw new BadRequestException(`产品不存在: ${(rawDetail as any).productCode || 'unknown'}`);
+      const detail = { ...rawDetail, productId };
       // 检查产品是否存在且未删除
       const [productRecord] = await this.db
         .select({
@@ -367,7 +403,7 @@ export class OutboundService {
 
       // 处理关单逻辑
       if (detail.closeOrder) {
-        await this.handleCloseOrder(detail.productId, data.customerId, order.id, order.outboundNo);
+        await this.handleCloseOrder(detail.productId, customerId, order.id, order.outboundNo);
       }
     }
 
@@ -384,11 +420,11 @@ export class OutboundService {
       operator: data.creator as any,
       afterState: JSON.stringify({
         outboundNo: order.outboundNo,
-        customerId: data.customerId,
+        customerId,
         customerName: data.customerName,
-        totalQuantity: data.totalQuantity,
-        totalWeight: data.totalWeight,
-        totalAmount: data.totalAmount,
+        totalQuantity,
+        totalWeight,
+        totalAmount,
         details: data.details,
       }),
       source: 'web',

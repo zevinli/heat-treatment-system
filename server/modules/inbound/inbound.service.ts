@@ -187,8 +187,31 @@ export class InboundService {
       batchNo?: string;
     }>;
   }) {
+    // 自动从 details 计算总计（当前端未传或为 0/NaN 时）
+    const totalAmount = data.totalAmount && !isNaN(data.totalAmount) && data.totalAmount > 0
+      ? data.totalAmount
+      : data.details.reduce((sum, d) => sum + ((d.unitPrice || 0) * (d.quantity || 0)), 0);
+    const totalQuantity = data.totalQuantity && !isNaN(data.totalQuantity) && data.totalQuantity > 0
+      ? data.totalQuantity
+      : data.details.reduce((sum, d) => sum + (d.quantity || 0), 0);
+    const totalWeight = data.totalWeight && !isNaN(data.totalWeight) && data.totalWeight > 0
+      ? data.totalWeight
+      : data.details.reduce((sum, d) => sum + (d.weight || 0), 0);
+
+    // 自动通过 customerCode 查找 customerId（若未传）
+    let customerId = data.customerId;
+    if (!customerId && data.customerCode) {
+      const [cust] = await this.db
+        .select({ id: customer.id })
+        .from(customer)
+        .where(eq(customer.code, data.customerCode))
+        .limit(1);
+      if (cust) customerId = cust.id;
+    }
+    if (!customerId) throw new BadRequestException('客户不存在或未提供客户ID');
+
     // 计算金额转分
-    const totalAmountCents = yuanToCents(data.totalAmount);
+    const totalAmountCents = yuanToCents(totalAmount);
 
     // 自动生成或验证入库单号
     const inboundNo = data.inboundNo || await this.generateInboundNo();
@@ -211,7 +234,7 @@ export class InboundService {
       .insert(inboundOrder)
       .values({
         inboundNo,
-        customerId: data.customerId,
+        customerId,
         customerName: data.customerName,
         customerCode: data.customerCode,
         inboundDate: data.inboundDate,
@@ -221,9 +244,9 @@ export class InboundService {
         transporter: data.transporter || null,
         plateNumber: data.plateNumber || null,
         driver: data.driver || null,
-        totalAmount: data.totalAmount,
-        totalQuantity: data.totalQuantity,
-        totalWeight: data.totalWeight,
+        totalAmount,
+        totalQuantity,
+        totalWeight,
         totalAmountCents,
         status: 'active',
       })
@@ -232,7 +255,19 @@ export class InboundService {
     const order = orderResult[0];
 
     // 创建明细、批次并更新库存
-    for (const detail of data.details) {
+    for (const rawDetail of data.details) {
+      // 自动通过 productCode 查找 productId（若未传）
+      let productId = (rawDetail as any).productId;
+      if (!productId && (rawDetail as any).productCode) {
+        const [prod] = await this.db
+          .select({ id: product.id })
+          .from(product)
+          .where(eq(product.code, (rawDetail as any).productCode))
+          .limit(1);
+        if (prod) productId = prod.id;
+      }
+      if (!productId) throw new BadRequestException(`产品不存在: ${(rawDetail as any).productCode || 'unknown'}`);
+      const detail = { ...rawDetail, productId };
       // 创建明细
       const [detailRecord] = await this.db.insert(inboundDetail).values({
         inboundId: order.id,
@@ -295,7 +330,7 @@ export class InboundService {
     }
 
     // 更新客户入库统计
-    await this.updateCustomerInboundStats(data.customerId, data.inboundDate);
+    await this.updateCustomerInboundStats(customerId, data.inboundDate);
 
     // 同步到飞书多维表格（异步，不阻塞主流程）
     this.syncToFeishuInbound(order, data).catch(err =>
@@ -310,11 +345,11 @@ export class InboundService {
       operator: data.creator as any,
       afterState: JSON.stringify({
         inboundNo: order.inboundNo,
-        customerId: data.customerId,
+        customerId,
         customerName: data.customerName,
-        totalQuantity: data.totalQuantity,
-        totalWeight: data.totalWeight,
-        totalAmount: data.totalAmount,
+        totalQuantity,
+        totalWeight,
+        totalAmount,
         details: data.details,
       }),
       source: 'web',

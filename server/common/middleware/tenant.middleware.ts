@@ -1,6 +1,6 @@
 import { Injectable, NestMiddleware, UnauthorizedException, ForbiddenException, Logger, Inject } from '@nestjs/common';
 import type { Request, Response, NextFunction } from 'express';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, sql } from 'drizzle-orm';
 import { DRIZZLE_DATABASE } from '@lark-apaas/fullstack-nestjs-core';
 import { TenantConnectionService } from '../../modules/tenant/tenant-connection.service';
 import { organization, organizationUser } from '../../database/schema';
@@ -25,6 +25,11 @@ export class TenantMiddleware implements NestMiddleware {
       const orgCode = this.extractOrgCode(req);
 
       if (!orgCode) {
+        // 检查是否有配置了数据库的组织，如果没有则允许所有请求通过（本地开发/初始安装）
+        const hasConfiguredOrgs = await this.hasConfiguredOrganizations();
+        if (!hasConfiguredOrgs) {
+          return next();
+        }
         // 如果是公开路由（如登录、组织列表），允许继续
         if (this.isPublicRoute(req.path)) {
           return next();
@@ -33,7 +38,7 @@ export class TenantMiddleware implements NestMiddleware {
         if (!req.path.startsWith('/api/')) {
           return next();
         }
-        throw new UnauthorizedException('Organization code is required');
+        throw new UnauthorizedException('请先选择组织');
       }
 
     // 2. 主数据库连接已通过依赖注入获取
@@ -61,18 +66,21 @@ export class TenantMiddleware implements NestMiddleware {
         }
       }
 
-      // 5. 获取租户数据库连接
-      const tenantDb = await this.tenantConnectionService.getTenantDb(orgCode, this.masterDb);
-
-      // 6. 将租户上下文附加到请求
-      const tenantContext: TenantContext = {
-        orgCode,
-        orgId,
-        db: tenantDb,
-      };
-      (req as any)[TENANT_CONTEXT] = tenantContext;
-
-      this.logger.debug(`Tenant context set for: ${orgCode}, user: ${userId}`);
+      // 5. 获取租户数据库连接（如果数据库配置不完整则跳过，使用主数据库）
+      try {
+        const tenantDb = await this.tenantConnectionService.getTenantDb(orgCode, this.masterDb);
+        // 6. 将租户上下文附加到请求
+        const tenantContext: TenantContext = {
+          orgCode,
+          orgId,
+          db: tenantDb,
+        };
+        (req as any)[TENANT_CONTEXT] = tenantContext;
+        this.logger.debug(`Tenant context set for: ${orgCode}, user: ${userId}`);
+      } catch (dbError: any) {
+        // 如果租户数据库连接失败（如配置不完整），使用主数据库
+        this.logger.warn(`租户数据库连接失败，使用主数据库: ${orgCode}, error: ${dbError.message}`);
+      }
 
       next();
     } catch (error) {
@@ -171,5 +179,29 @@ export class TenantMiddleware implements NestMiddleware {
       '/api/invites',
     ];
     return publicRoutes.some(route => path.startsWith(route));
+  }
+
+  /**
+   * 检查是否有配置了完整数据库信息的组织
+   * 如果没有任何组织有 DB 配置（dbHost, dbUser, dbPassword），
+   * 说明是本地开发环境，跳过租户检查
+   */
+  private async hasConfiguredOrganizations(): Promise<boolean> {
+    try {
+      const result = await this.masterDb
+        .select({ id: organization.id })
+        .from(organization)
+        .where(
+          and(
+            sql`${organization.dbHost} IS NOT NULL`,
+            sql`${organization.dbUser} IS NOT NULL`,
+            sql`${organization.dbPassword} IS NOT NULL`,
+          ),
+        )
+        .limit(1);
+      return result.length > 0;
+    } catch {
+      return false;
+    }
   }
 }

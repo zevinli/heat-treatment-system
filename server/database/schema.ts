@@ -350,7 +350,7 @@ export const reconciliationDetail = pgTable("reconciliation_detail", {
   version: integer().default(1).notNull(),
   isActive: boolean("is_active").default(true).notNull(),
   updateReason: text("update_reason"),
-  updatedBy: userProfile("updated_by"),
+  updatedBy: userProfile("_updated_by"),
 }, (table) => [
   index("idx_reconciliation_detail_active").using("btree", table.reconciliationId.asc().nullsLast().op("uuid_ops"), table.isActive.asc().nullsLast().op("bool_ops")),
   index("idx_reconciliation_detail_reconciliation").using("btree", table.reconciliationId.asc().nullsLast().op("uuid_ops")),
@@ -793,7 +793,7 @@ export const statisticsDaily = pgTable("statistics_daily", {
 
 export const outboundBatchDetail = pgTable("outbound_batch_detail", {
   id: uuid().defaultRandom().notNull(),
-  outboundDetailId: uuid("outbound_detail_id").notNull(),
+  outboundDetailId: uuid("outbound_id").notNull(),
   batchId: uuid("batch_id").notNull(),
   quantity: integer().notNull(),
   weight: doublePrecision().notNull(),
