@@ -30,6 +30,7 @@ import {
   Receipt,
   FileSignature,
   Zap,
+  Printer,
 } from 'lucide-react';
 import {
   useProcessCardTemplate,
@@ -38,6 +39,14 @@ import {
   type ITemplateField,
   type ITemplateConfig,
 } from '@/hooks/usePrintTemplate';
+import {
+  DEFAULT_PRINTER_CONFIG,
+  getPrinterConfig,
+  savePrinterConfig,
+  smartPrint,
+  type PrinterConfig,
+} from '@/lib/print-service';
+import { toast } from 'sonner';
 // 预览数据类型
 type InboundItemData = {
   id: string;
@@ -528,6 +537,30 @@ const CommonSettingsPanel = ({
   <div className="space-y-4">
     <div className="grid grid-cols-2 gap-4">
       <div className="space-y-2">
+        <Label>纸张规格</Label>
+        <Select value={config.paperSize} onValueChange={(paperSize: ITemplateConfig['paperSize']) => onUpdate({ paperSize })}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="a4">A4</SelectItem>
+            <SelectItem value="a5">A5</SelectItem>
+            <SelectItem value="custom">自定义/卷纸</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-2">
+        <Label>打印方向</Label>
+        <Select value={config.paperOrientation} onValueChange={(paperOrientation: ITemplateConfig['paperOrientation']) => onUpdate({ paperOrientation })}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="portrait">纵向</SelectItem>
+            <SelectItem value="landscape">横向</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+
+    <div className="grid grid-cols-2 gap-4">
+      <div className="space-y-2">
         <Label>公司名称</Label>
         <Input
           value={config.companyName}
@@ -623,6 +656,23 @@ export default function TemplateConfigPage() {
   const deliveryNote = useDeliveryNoteTemplate();
   const reconciliation = useReconciliationTemplate();
   const [activeTab, setActiveTab] = useState('process-card');
+  const [printerConfig, setPrinterConfig] = useState<PrinterConfig>(() => {
+    if (typeof window === 'undefined') return DEFAULT_PRINTER_CONFIG;
+    return getPrinterConfig();
+  });
+
+  const persistPrinterConfig = () => {
+    if (printerConfig.mode === 'network' && !printerConfig.networkUrl.trim()) {
+      toast.error('请输入网络打印服务地址');
+      return;
+    }
+    if (printerConfig.mode === 'bluetooth' && (!printerConfig.bluetoothServiceUuid.trim() || !printerConfig.bluetoothCharacteristicUuid.trim())) {
+      toast.error('请输入蓝牙 Service UUID 和 Characteristic UUID');
+      return;
+    }
+    savePrinterConfig(printerConfig);
+    toast.success('打印机配置已保存');
+  };
 
   return (
     <div className="space-y-6">
@@ -635,6 +685,54 @@ export default function TemplateConfigPage() {
           </p>
         </div>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><Printer className="h-5 w-5" />现场打印机</CardTitle>
+          <CardDescription>浏览器打印无需配置；网络打印需填写本地打印桥接服务；蓝牙打印需使用 HTTPS 下的 Chrome/Edge。</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="space-y-2">
+              <Label>打印方式</Label>
+              <Select value={printerConfig.mode} onValueChange={(mode: PrinterConfig['mode']) => setPrinterConfig(prev => ({ ...prev, mode }))}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="browser">浏览器/系统打印</SelectItem>
+                  <SelectItem value="network">网络打印服务</SelectItem>
+                  <SelectItem value="bluetooth">蓝牙打印机</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {printerConfig.mode === 'network' && (
+              <div className="space-y-2 md:col-span-2">
+                <Label>打印服务地址</Label>
+                <Input value={printerConfig.networkUrl} onChange={event => setPrinterConfig(prev => ({ ...prev, networkUrl: event.target.value }))} placeholder="http://192.168.1.20:9101/print" />
+              </div>
+            )}
+            {printerConfig.mode === 'bluetooth' && (
+              <>
+                <div className="space-y-2">
+                  <Label>Service UUID</Label>
+                  <Input value={printerConfig.bluetoothServiceUuid} onChange={event => setPrinterConfig(prev => ({ ...prev, bluetoothServiceUuid: event.target.value }))} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Characteristic UUID</Label>
+                  <Input value={printerConfig.bluetoothCharacteristicUuid} onChange={event => setPrinterConfig(prev => ({ ...prev, bluetoothCharacteristicUuid: event.target.value }))} />
+                </div>
+              </>
+            )}
+          </div>
+          <div id="printer-test-content" className="sr-only">热处理收发货管理系统 打印测试 {new Date().toLocaleString('zh-CN')}</div>
+          <div className="flex gap-2">
+            <Button onClick={persistPrinterConfig}>保存打印配置</Button>
+            <Button variant="outline" onClick={async () => {
+              persistPrinterConfig();
+              try { await smartPrint('printer-test-content', '打印测试'); } catch { /* 已提示 */ }
+            }}>测试打印</Button>
+          </div>
+        </CardContent>
+      </Card>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="grid w-full grid-cols-3 lg:w-[420px]">

@@ -87,7 +87,9 @@ export function parsePrice(value: unknown): ParseResult<number> {
   for (const pattern of pricePatterns) {
     const match = str.match(pattern.regex);
     if (match) {
-      let num = parseFloat(match[pattern.extract].replace(/,/g, ''));
+      const captured = match[pattern.extract ?? 0];
+      if (captured === undefined) continue;
+      let num = parseFloat(captured.replace(/,/g, ''));
       if (pattern.multiplier) {
         num *= pattern.multiplier;
       }

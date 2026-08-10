@@ -20,8 +20,10 @@ import {
   ClipboardList,
   History,
   type LucideIcon,
+  ImagePlus,
 } from 'lucide-react';
-import { exportToExcel, triggerPrint } from '@/lib/excel-export';
+import { exportToExcel } from '@/lib/excel-export';
+import { smartPrint } from '@/lib/print-service';
 import { useProcessCardTemplate, type ITemplateConfig, type ITemplateField } from '@/hooks/usePrintTemplate';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -41,6 +43,8 @@ import { AIRecognitionDialog, type AIRecognitionResult } from '@/components/AIRe
 import type { VoiceParseResult } from '@/api';
 import { StepProgress } from '@/pages/StepProgressPage/StepProgressPage';
 import { EditableSelect } from '@/components/EditableSelect';
+import * as XLSX from '@e965/xlsx';
+import { logger } from '@lark-apaas/client-toolkit/logger';
 
 // 注意：入库单号由后端自动生成，格式为 RK + 年月日 + 3位序号
 // 前端无需传 inboundNo 字段
@@ -62,6 +66,7 @@ interface IInboundDetail {
   material: string;
   techRequirement: string;
   urgent: boolean;
+  attachments?: string[];
 }
 
 // 防抖Hook
@@ -368,6 +373,94 @@ const InboundPage: React.FC = () => {
   // 删除入库明细
   const handleDeleteDetail = (id: string) => {
     setInboundDetails(prev => prev.filter(item => item.id !== id));
+  };
+
+  const handlePhotoUpload = async (detailId: string, files: FileList | null) => {
+    if (!files?.length) return;
+    const current = inboundDetails.find(detail => detail.id === detailId)?.attachments || [];
+    const selected = Array.from(files).slice(0, Math.max(0, 3 - current.length));
+    if (selected.some(file => !file.type.startsWith('image/') || file.size > 2 * 1024 * 1024)) {
+      toast.error('仅支持图片，每张不超过2MB，单个产品最多3张');
+      return;
+    }
+    const encoded = await Promise.all(selected.map(file => new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    })));
+    setInboundDetails(details => details.map(detail => detail.id === detailId
+      ? { ...detail, attachments: [...(detail.attachments || []), ...encoded].slice(0, 3) }
+      : detail));
+  };
+
+  const handleInboundListImport = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      let rows: Record<string, unknown>[] = [];
+      if (file.name.toLowerCase().endsWith('.txt') || file.type.startsWith('text/')) {
+        rows = (await file.text()).split(/\r?\n/).filter(Boolean).map(line => {
+          const [product, quantity, weight] = line.split(/[\t,，]/).map(value => value.trim());
+          return { 产品: product, 数量: quantity, 重量: weight };
+        });
+      } else {
+        const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
+      }
+      const pick = (row: Record<string, unknown>, aliases: string[]) => {
+        const key = Object.keys(row).find(item => aliases.some(alias => item.trim().toLowerCase() === alias.toLowerCase()));
+        return key ? row[key] : undefined;
+      };
+      let imported = 0;
+      const missing: string[] = [];
+      setInboundDetails(current => {
+        const next = [...current];
+        rows.forEach((row, index) => {
+          const productKey = String(pick(row, ['产品', '产品编码', '产品编号', '产品名称', 'product', 'code', 'name']) || '').trim();
+          if (!productKey) return;
+          const matched = products.find(product => product.code === productKey || product.name === productKey);
+          if (!matched || (selectedCustomer && matched.customerCode !== selectedCustomer.code)) {
+            missing.push(productKey);
+            return;
+          }
+          const quantity = Math.max(0, Math.trunc(Number(pick(row, ['数量', '入库数量', 'quantity']) || 0)));
+          const weight = Math.max(0, Number(pick(row, ['重量', '入库重量', 'weight', 'kg']) || 0));
+          const existingIndex = next.findIndex(detail => detail.productId === matched.id);
+          if (existingIndex >= 0) {
+            const existing = next[existingIndex];
+            const mergedQuantity = existing.quantity + quantity;
+            const mergedWeight = existing.weight + weight;
+            next[existingIndex] = {
+              ...existing,
+              quantity: mergedQuantity,
+              weight: mergedWeight,
+              amount: matched.unit === '件' ? mergedQuantity * matched.unitPrice : mergedWeight * matched.unitPrice,
+            };
+          } else {
+            next.push({
+              id: `import-${Date.now()}-${index}`,
+              productId: matched.id,
+              productName: matched.name,
+              productModel: matched.workpieceNo || '',
+              productSpec: '', unit: matched.unit || '件', unitPrice: matched.unitPrice,
+              quantity, weight,
+              amount: matched.unit === '件' ? quantity * matched.unitPrice : weight * matched.unitPrice,
+              inboundType: '正常', process: matched.process, material: matched.material,
+              techRequirement: matched.techRequirement, urgent: false,
+            });
+          }
+          imported += 1;
+        });
+        return next;
+      });
+      if (missing.length) toast.warning(`未匹配产品，已跳过：${[...new Set(missing)].slice(0, 8).join('、')}`);
+      if (imported) toast.success(`已导入 ${imported} 行产品清单`);
+      else toast.error('清单中没有可导入的产品');
+    } catch (error) {
+      logger.error('导入入库清单失败', error);
+      toast.error('清单解析失败，请检查 Excel 或文本格式');
+    }
   };
   
   // 处理语音录入结果
@@ -725,12 +818,12 @@ const InboundPage: React.FC = () => {
 
   // 客户表格列
   const customerColumns: any = [
-    { title: '序号', dataIndex: 'id', key: 'id', width: 60, render: (_, __, index) => index + 1 },
+    { title: '序号', dataIndex: 'id', key: 'id', width: 60, render: (_: unknown, __: ICustomer, index: number) => index + 1 },
     { 
       title: '操作', 
       key: 'action', 
       width: 80,
-      render: (_, record) => (
+      render: (_: unknown, record: ICustomer) => (
         <Button 
           size="sm" 
           className="bg-primary hover:bg-primary/90"
@@ -754,7 +847,7 @@ const InboundPage: React.FC = () => {
 
   // 产品选择表格列
   const productColumns: any = [
-    { title: '序号', dataIndex: 'id', key: 'id', width: 60, render: (_, __, index) => index + 1 },
+    { title: '序号', dataIndex: 'id', key: 'id', width: 60, render: (_: unknown, __: IProduct, index: number) => index + 1 },
     { title: '产品名称', dataIndex: 'name', key: 'name', width: 140, ellipsis: true },
     { title: '客户编码', dataIndex: 'customerCode', key: 'customerCode', width: 100 },
     { title: '客户名称', dataIndex: 'customerName', key: 'customerName', width: 120 },
@@ -762,8 +855,8 @@ const InboundPage: React.FC = () => {
     { title: '材质', dataIndex: 'material', key: 'material', width: 100 },
     { title: '技术要求内容', dataIndex: 'techRequirement', key: 'techRequirement', width: 200 },
     { title: '工件编号', dataIndex: 'workpieceNo', key: 'workpieceNo', width: 100 },
-    { title: '计价单位', dataIndex: 'unit', key: 'unit', width: 90, render: (v) => <span className="font-medium text-primary">{v || '件'}</span> },
-    { title: '单价', dataIndex: 'unitPrice', key: 'unitPrice', width: 80, render: (v) => `¥${v?.toFixed(2) || '0.00'}` },
+    { title: '计价单位', dataIndex: 'unit', key: 'unit', width: 90, render: (v: string | undefined) => <span className="font-medium text-primary">{v || '件'}</span> },
+    { title: '单价', dataIndex: 'unitPrice', key: 'unitPrice', width: 80, render: (v: number | undefined) => `¥${v?.toFixed(2) || '0.00'}` },
     {
       title: '状态',
       dataIndex: 'status',
@@ -785,7 +878,7 @@ const InboundPage: React.FC = () => {
       key: 'action',
       width: 80,
       fixed: 'right',
-      render: (_, record: IProduct) => (
+      render: (_: unknown, record: IProduct) => (
         <Button
           size="sm"
           variant={record.status === 'incomplete' ? 'secondary' : 'outline'}
@@ -963,8 +1056,7 @@ const InboundPage: React.FC = () => {
         backgroundColor: 'var(--print-bg, #ffffff)', 
         color: 'var(--print-text, #000000)',
         fontFamily: 'SimSun, Songti SC, serif',
-        maxHeight: '270mm',
-        overflow: 'hidden',
+        minHeight: '180mm',
         boxSizing: 'border-box',
         fontSize: `${config.fontSize}pt`
       }}>
@@ -995,6 +1087,28 @@ const InboundPage: React.FC = () => {
             </tr>
           </tbody>
         </table>
+
+        {inboundDetails.some(detail => (detail.attachments?.length || 0) > 0) && (
+          <div style={{ marginTop: '10px', pageBreakInside: 'avoid' }}>
+            <div style={{ fontWeight: 'bold', marginBottom: '5px' }}>产品现场图片</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+              {inboundDetails.flatMap((detail, detailIndex) =>
+                (detail.attachments || []).map((src, imageIndex) => (
+                  <figure key={`${detail.id}-${imageIndex}`} style={{ margin: 0, width: '82px' }}>
+                    <img
+                      src={src}
+                      alt={`${detail.productName}现场图片${imageIndex + 1}`}
+                      style={{ width: '82px', height: '62px', objectFit: 'cover', border: '1px solid #666' }}
+                    />
+                    <figcaption style={{ fontSize: '8pt', textAlign: 'center', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+                      {detailIndex + 1}. {detail.productName}
+                    </figcaption>
+                  </figure>
+                )),
+              )}
+            </div>
+          </div>
+        )}
 
         {/* 产品明细表格 - 动态字段 */}
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: `${config.fontSize}pt`, marginBottom: '10px' }}>
@@ -1318,6 +1432,11 @@ const InboundPage: React.FC = () => {
                   <Plus className="w-4 h-4" />
                   添加产品
                 </Button>
+                <label className="inline-flex h-10 items-center gap-2 rounded-md border bg-background px-4 text-sm font-medium cursor-pointer hover:bg-muted">
+                  <Download className="w-4 h-4" />
+                  导入清单
+                  <input type="file" accept=".xlsx,.xls,.csv,.txt,text/plain" className="hidden" onChange={(event) => { void handleInboundListImport(event.target.files?.[0]); event.currentTarget.value = ''; }} />
+                </label>
                 <Button
                   variant="outline"
                   onClick={() => setVoiceInputOpen(true)}
@@ -1346,6 +1465,7 @@ const InboundPage: React.FC = () => {
                     <th className="p-2 text-left text-xs font-medium">入库金额</th>
                     <th className="p-2 text-left text-xs font-medium">入库类型</th>
                     <th className="p-2 text-left text-xs font-medium">加工工艺</th>
+                    <th className="p-2 text-left text-xs font-medium">产品图片</th>
                     <th className="p-2 text-left text-xs font-medium">技术要求</th>
                   </tr>
                 </thead>
@@ -1420,6 +1540,21 @@ const InboundPage: React.FC = () => {
                         <span className="text-sm text-muted-foreground">
                           {detail.process || <span className="text-muted-foreground/50 italic">-</span>}
                         </span>
+                      </td>
+                      <td className="p-2 min-w-36">
+                        <div className="flex items-center gap-1">
+                          {(detail.attachments || []).map((src, imageIndex) => (
+                            <button key={imageIndex} type="button" className="relative" onClick={() => setInboundDetails(items => items.map(item => item.id === detail.id ? { ...item, attachments: item.attachments?.filter((_, index) => index !== imageIndex) } : item))} title="点击删除图片">
+                              <img src={src} alt={`${detail.productName} ${imageIndex + 1}`} className="w-10 h-10 rounded object-cover border" />
+                            </button>
+                          ))}
+                          {(detail.attachments?.length || 0) < 3 && (
+                            <label className="w-10 h-10 rounded border border-dashed flex items-center justify-center cursor-pointer hover:bg-muted" title="拍照或选择图片">
+                              <ImagePlus className="w-4 h-4" />
+                              <input type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={(event) => { void handlePhotoUpload(detail.id, event.target.files); event.currentTarget.value = ''; }} />
+                            </label>
+                          )}
+                        </div>
                       </td>
                       <td className="p-2 text-xs text-muted-foreground max-w-xs truncate">{detail.techRequirement}</td>
                     </tr>
@@ -1747,7 +1882,7 @@ const InboundPage: React.FC = () => {
             <Button onClick={() => {
               // 延迟打印，确保Dialog内容完全渲染
               setTimeout(() => {
-                triggerPrint('print-preview-content');
+                smartPrint('print-preview-content', '热处理流程卡').catch(() => undefined);
               }, 500);
             }}>
               <Printer className="w-4 h-4 mr-2" />

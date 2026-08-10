@@ -30,25 +30,6 @@ interface Organization {
   createdAt: string;
 }
 
-// 本地存储键名
-const LOCAL_ORGS_KEY = 'heat_treatment_local_orgs';
-
-// 从 localStorage 读取本地组织列表
-function getLocalOrgs(): Organization[] {
-  try {
-    const raw = localStorage.getItem(LOCAL_ORGS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-// 保存组织到 localStorage
-function saveLocalOrg(org: Organization): void {
-  const orgs = [org, ...getLocalOrgs()];
-  localStorage.setItem(LOCAL_ORGS_KEY, JSON.stringify(orgs));
-}
-
 export default function OrganizationPage() {
   const navigate = useNavigate();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
@@ -68,22 +49,11 @@ export default function OrganizationPage() {
   const fetchOrganizations = async () => {
     try {
       setLoading(true);
-      // 先尝试从服务器获取
       const response = await axiosForBackend.get('/api/tenant/my-organizations');
-      const remoteOrgs = response.data.items || [];
-      // 合并本地组织
-      const localOrgs = getLocalOrgs();
-      const merged = [...remoteOrgs];
-      for (const localOrg of localOrgs) {
-        if (!merged.find(o => o.code === localOrg.code)) {
-          merged.push(localOrg);
-        }
-      }
-      setOrganizations(merged);
-    } catch {
-      // 服务器不可用时使用本地数据
-      const localOrgs = getLocalOrgs();
-      setOrganizations(localOrgs);
+      setOrganizations(response.data.items || response.data || []);
+    } catch (error: any) {
+      setOrganizations([]);
+      toast.error(error?.response?.data?.error?.message || '无法读取组织列表，请检查网络或重新登录');
     } finally {
       setLoading(false);
     }
@@ -103,40 +73,12 @@ export default function OrganizationPage() {
     try {
       setCreating(true);
       
-      let org: Organization;
-      
-      try {
-        // 尝试通过 API 创建
-        await axiosForBackend.post('/api/tenant/organizations', {
-          name: newOrgName.trim(),
-          code: newOrgCode.trim(),
-        });
-        org = {
-          id: newOrgCode.trim(),
-          code: newOrgCode.trim(),
-          name: newOrgName.trim(),
-          role: 'super_admin',
-          status: 'active',
-          createdAt: new Date().toISOString(),
-        };
-      } catch (apiError) {
-        // API 失败则本地创建
-        const localOrgs = getLocalOrgs();
-        if (localOrgs.find(o => o.code === newOrgCode.trim())) {
-          toast.error('组织编码已存在');
-          setCreating(false);
-          return;
-        }
-        org = {
-          id: 'local_' + Date.now(),
-          code: newOrgCode.trim(),
-          name: newOrgName.trim(),
-          role: 'super_admin',
-          status: 'active',
-          createdAt: new Date().toISOString(),
-        };
-        saveLocalOrg(org);
-      }
+      const response = await axiosForBackend.post('/api/tenant/organizations', {
+        name: newOrgName.trim(),
+        code: newOrgCode.trim(),
+      });
+      const org = response.data;
+      if (!org?.id || !org?.code) throw new Error('服务器未返回有效的组织信息');
       
       toast.success('组织创建成功！正在进入系统...');
       setDialogOpen(false);

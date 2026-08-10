@@ -1,12 +1,13 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { DRIZZLE_DATABASE } from '@lark-apaas/fullstack-nestjs-core';
 import { eq } from 'drizzle-orm';
-// eslint-disable-next-line import/no-extraneous-dependencies
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import type * as tenantSchema from '../../database/schema';
 import { organization } from '../../database/schema';
+import { initializeDatabase } from '../../scripts/init-db';
 
-interface OrganizationConfig {
+export interface OrganizationConfig {
   id: string;
   code: string;
   dbName: string;
@@ -23,10 +24,10 @@ interface OrganizationConfig {
 @Injectable()
 export class TenantConnectionService {
   private readonly logger = new Logger(TenantConnectionService.name);
-  private connections: Map<string, unknown> = new Map();
+  private connections: Map<string, any> = new Map();
   private configs: Map<string, OrganizationConfig> = new Map();
 
-  constructor() {
+  constructor(@Inject(DRIZZLE_DATABASE) private readonly masterDb: any) {
     this.logger.log('TenantConnectionService initialized');
   }
 
@@ -38,8 +39,8 @@ export class TenantConnectionService {
    */
   async getTenantDb(
     orgCode: string,
-    masterDb: any,
-  ): Promise<unknown> {
+    masterDb: any = this.masterDb,
+  ): Promise<any> {
     // 1. 从缓存获取连接
     const cachedDb = this.connections.get(orgCode);
     if (cachedDb) {
@@ -49,6 +50,9 @@ export class TenantConnectionService {
     // 2. 从主库查询租户数据库配置
     const orgConfig = await this.getOrganizationConfig(orgCode, masterDb);
     if (!orgConfig) {
+      if (process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEV_MASTER_DB_FALLBACK !== 'false') {
+        return masterDb;
+      }
       throw new Error(`Organization '${orgCode}' not found`);
     }
 
@@ -97,6 +101,10 @@ export class TenantConnectionService {
 
     // 验证配置完整性
     if (!result[0].dbHost || !result[0].dbUser || !result[0].dbPassword) {
+      if (process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEV_MASTER_DB_FALLBACK !== 'false') {
+        this.logger.warn(`Development-only master database fallback for organization: ${orgCode}`);
+        return null;
+      }
       throw new Error(`Incomplete database configuration for organization: ${orgCode}`);
     }
 
@@ -116,8 +124,8 @@ export class TenantConnectionService {
    */
   private async createTenantConnection(
     config: OrganizationConfig,
-  ): Promise<unknown> {
-    const connectionString = `postgres://${config.dbUser}:${config.dbPassword}@${config.dbHost}:${config.dbPort}/${config.dbName}`;
+  ): Promise<any> {
+    const connectionString = this.connectionString(config, config.dbName);
 
     try {
       const client = postgres(connectionString, {
@@ -139,6 +147,33 @@ export class TenantConnectionService {
       );
       throw new Error(`Failed to connect to tenant database: ${config.dbName}`);
     }
+  }
+
+  async provisionTenantDatabase(config: Omit<OrganizationConfig, 'id'>): Promise<void> {
+    if (!config.dbHost || !config.dbUser || !config.dbPassword) {
+      if (process.env.NODE_ENV !== 'production') return;
+      throw new Error('生产环境创建组织必须提供完整租户数据库配置');
+    }
+    const maintenanceDb = process.env.TENANT_MAINTENANCE_DATABASE || 'postgres';
+    const admin = postgres(this.connectionString(config as OrganizationConfig, maintenanceDb), {
+      max: 1,
+      connect_timeout: 15,
+    });
+    try {
+      const exists = await admin`SELECT 1 FROM pg_database WHERE datname = ${config.dbName}`;
+      if (exists.length === 0) {
+        await admin`CREATE DATABASE ${admin(config.dbName)}`;
+      }
+    } finally {
+      await admin.end();
+    }
+    await initializeDatabase(this.connectionString(config as OrganizationConfig, config.dbName));
+  }
+
+  private connectionString(config: OrganizationConfig, databaseName: string): string {
+    const user = encodeURIComponent(config.dbUser || '');
+    const password = encodeURIComponent(config.dbPassword || '');
+    return `postgres://${user}:${password}@${config.dbHost}:${config.dbPort || 5432}/${encodeURIComponent(databaseName)}`;
   }
 
   /**

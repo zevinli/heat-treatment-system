@@ -14,7 +14,7 @@ import {
 import { TenantService, type CreateOrganizationDto, type UpdateOrganizationDto, type AddOrgMemberDto } from './tenant.service';
 import { TenantConnectionService } from './tenant-connection.service';
 import type { Request } from 'express';
-import { NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
+import { CanRole, NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
 
 @Controller('api/tenant')
 export class TenantController {
@@ -75,6 +75,7 @@ export class TenantController {
    * 获取组织列表
    */
   @NeedLogin()
+  @CanRole('admin')
   @Get('organizations')
   async getOrganizations(
     @Query('search') search?: string,
@@ -94,6 +95,7 @@ export class TenantController {
    * 获取组织详情
    */
   @NeedLogin()
+  @CanRole('admin')
   @Get('organizations/:id')
   async getOrganization(@Param('id') id: string) {
     const organization = await this.tenantService.findById(id);
@@ -127,6 +129,7 @@ export class TenantController {
    * 更新组织
    */
   @NeedLogin()
+  @CanRole('admin')
   @Put('organizations/:id')
   async updateOrganization(
     @Param('id') id: string,
@@ -154,6 +157,7 @@ export class TenantController {
    * 删除组织
    */
   @NeedLogin()
+  @CanRole('admin')
   @Delete('organizations/:id')
   async deleteOrganization(@Param('id') id: string) {
     await this.tenantService.delete(id);
@@ -164,6 +168,7 @@ export class TenantController {
    * 添加成员到组织
    */
   @NeedLogin()
+  @CanRole('admin')
   @Post('organizations/:id/members')
   async addMember(
     @Param('id') id: string,
@@ -183,6 +188,7 @@ export class TenantController {
    * 移除成员
    */
   @NeedLogin()
+  @CanRole('admin')
   @Delete('organizations/:id/members/:userId')
   async removeMember(
     @Param('id') id: string,
@@ -196,6 +202,7 @@ export class TenantController {
    * 创建邀请码
    */
   @NeedLogin()
+  @CanRole('admin')
   @Post('organizations/:id/invite-codes')
   async createInviteCode(
     @Param('id') id: string,
@@ -252,6 +259,7 @@ export class TenantController {
    * 获取连接统计（管理员接口）
    */
   @NeedLogin()
+  @CanRole('admin')
   @Get('admin/connection-stats')
   getConnectionStats() {
     return {

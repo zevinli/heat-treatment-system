@@ -91,8 +91,7 @@ export class FeishuAuthService {
   isConfigured(): boolean {
     return Boolean(
       process.env.FEISHU_APP_ID &&
-      process.env.FEISHU_APP_SECRET &&
-      process.env.FEISHU_BITABLE_APP_TOKEN,
+      process.env.FEISHU_APP_SECRET,
     );
   }
 }

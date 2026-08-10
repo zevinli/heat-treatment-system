@@ -1,9 +1,9 @@
 import { Injectable, Inject, NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { eq, and, sql, desc } from 'drizzle-orm';
 import {
-  DRIZZLE_DATABASE,
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
+import { TENANT_DATABASE } from '../../common/tenant-database.provider';
 import { outboundOrderTable, outboundDetail, productTable, productBatchTable, productBatchStockTable, undoLogTable, inventoryRecordTable, reconciliationTable, inboundOrderTable, operationLogTable, customer } from '../../database/schema';
 import { checkUndoable } from '../../common/utils/undo-check.util';
 import { PermissionService } from '../permission/permission.service';
@@ -16,7 +16,7 @@ import { PermissionService } from '../permission/permission.service';
 @Injectable()
 export class UndoService {
   constructor(
-    @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
     private readonly permissionService: PermissionService,
   ) {}
 

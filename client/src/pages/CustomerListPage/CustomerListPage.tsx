@@ -216,14 +216,14 @@ const CustomerListPage: React.FC = () => {
         await createCustomer({
           code: customer.code!,
           name: customer.name!,
-          contact: customer.contact,
-          phone: customer.phone,
-          address: customer.address,
-          transport: customer.transport,
-          paymentTerm: customer.paymentTerm,
-          deliveryDirection: customer.deliveryDirection,
-          settlement: customer.settlement,
-          category: customer.category,
+          contact: customer.contact ?? undefined,
+          phone: customer.phone ?? undefined,
+          address: customer.address ?? undefined,
+          transport: customer.transport ?? undefined,
+          paymentTerm: customer.paymentTerm ?? undefined,
+          deliveryDirection: customer.deliveryDirection ?? undefined,
+          settlement: customer.settlement ?? undefined,
+          category: customer.category ?? undefined,
           status: customer.status || 'active',
         });
         successCount++;
@@ -615,7 +615,7 @@ const CustomerListPage: React.FC = () => {
         <CardContent>
           {/* 筛选器组 */}
           <FilterGroup gap="sm" className="mb-4">
-            <Filter value={searchKeyword} onValueChange={setSearchKeyword}>
+            <Filter value={searchKeyword} onValueChange={(value) => setSearchKeyword(value || '')}>
               <FilterTrigger label="关键词" closable={!!searchKeyword} />
               <FilterContent>
                 <FilterTextContent 
@@ -1074,7 +1074,7 @@ const ImportCustomerDialog: React.FC<ImportCustomerDialogProps> = ({
       try {
         const data = event.target?.result;
         if (data) {
-          import('xlsx').then((XLSX) => {
+          import('@e965/xlsx').then((XLSX) => {
             const workbook = XLSX.read(data, { type: 'binary' });
             const sheetName = workbook.SheetNames[0];
             const worksheet = workbook.Sheets[sheetName];

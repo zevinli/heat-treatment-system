@@ -22,7 +22,8 @@ import {
   History,
   type LucideIcon,
 } from 'lucide-react';
-import { exportToExcel, triggerPrint } from '@/lib/excel-export';
+import { exportToExcel } from '@/lib/excel-export';
+import { smartPrint } from '@/lib/print-service';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -339,6 +340,7 @@ const OutboundPage: React.FC = () => {
         amount: detail.outboundAmount,
         batchNo: detail.batchNo,
         inboundDate: outboundDate,
+        closeOrder: detail.closeOrder,
       }));
 
       // 创建出库单记录（后端会自动扣减库存）
@@ -1112,7 +1114,7 @@ const OutboundPage: React.FC = () => {
                               </div>
                             )}
                           </td>
-                          <td className="p-2 text-sm">{product.stockWeight > 0 ? `${product.stockWeight.toFixed(2)} kg` : '-'}</td>
+                          <td className="p-2 text-sm">{(product.stockWeight || 0) > 0 ? `${(product.stockWeight || 0).toFixed(2)} kg` : '-'}</td>
                         </tr>
                       );
                     })
@@ -1339,7 +1341,7 @@ const OutboundPage: React.FC = () => {
             <Button onClick={() => {
               // 延迟打印，确保Dialog内容完全渲染
               setTimeout(() => {
-                triggerPrint('print-preview-content');
+                smartPrint('print-preview-content', '送货单').catch(() => undefined);
               }, 500);
             }}>
               <Printer className="w-4 h-4 mr-2" />

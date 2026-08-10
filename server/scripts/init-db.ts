@@ -1,9 +1,30 @@
 import { PGlite } from '@electric-sql/pglite';
 import { join } from 'path';
+import postgres from 'postgres';
 
-async function main() {
-  console.log("=== Initializing PGlite Database ===");
-  const db = new PGlite(join(process.cwd(), 'data'));
+type SqlDatabase = {
+  exec(sql: string): Promise<unknown>;
+  query(sql: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
+  close(): Promise<void>;
+};
+
+async function openDatabase(targetUrl?: string): Promise<SqlDatabase> {
+  const databaseUrl = targetUrl || process.env.DATABASE_URL || process.env.SUDA_DATABASE_URL;
+  if (databaseUrl) {
+    const client = postgres(databaseUrl, { max: 1, connect_timeout: 15 });
+    return {
+      exec: sqlText => client.unsafe(sqlText),
+      query: async (sqlText, params = []) => ({ rows: await client.unsafe(sqlText, params as any[]) }),
+      close: () => client.end(),
+    };
+  }
+  const client = new PGlite(process.env.PGLITE_DATA_DIR || join(process.cwd(), 'data'));
+  return client as unknown as SqlDatabase;
+}
+
+export async function initializeDatabase(targetUrl?: string) {
+  console.log("=== Initializing Database ===");
+  const db = await openDatabase(targetUrl);
   
   // Step 1: Create custom composite types (needed for drizzle compatibility)
   console.log("Creating composite types...");
@@ -89,6 +110,36 @@ async function main() {
       _updated_by VARCHAR(255)
     );
 
+    CREATE TABLE IF NOT EXISTS app_user (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      username VARCHAR(100) NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      role VARCHAR(50) NOT NULL DEFAULT 'viewer',
+      department VARCHAR(255),
+      email VARCHAR(255),
+      phone VARCHAR(50),
+      avatar TEXT,
+      position VARCHAR(255),
+      location VARCHAR(255),
+      status VARCHAR(50) NOT NULL DEFAULT 'active',
+      device_limit INTEGER NOT NULL DEFAULT 3 CHECK (device_limit > 0),
+      last_login_at TIMESTAMPTZ,
+      _created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      _updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS auth_session (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+      token_id VARCHAR(128) NOT NULL UNIQUE,
+      device_name VARCHAR(255),
+      expires_at TIMESTAMPTZ NOT NULL,
+      revoked_at TIMESTAMPTZ,
+      _created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_auth_session_user ON auth_session(user_id);
+
     -- ======== Business tables ========
     CREATE TABLE IF NOT EXISTS customer (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -134,6 +185,7 @@ async function main() {
       inbound_quantity INTEGER DEFAULT 0,
       inbound_weight DOUBLE PRECISION DEFAULT 0,
       inbound_date TIMESTAMPTZ,
+      batch_no VARCHAR(255),
       warning_threshold INTEGER DEFAULT 50,
       max_storage_days INTEGER DEFAULT 30,
       status VARCHAR(50) DEFAULT 'complete',
@@ -201,7 +253,7 @@ async function main() {
 
     CREATE TABLE IF NOT EXISTS inbound_order (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      inbound_no VARCHAR(255) NOT NULL,
+      inbound_no VARCHAR(255) NOT NULL UNIQUE,
       customer_id UUID NOT NULL REFERENCES customer(id),
       customer_name VARCHAR(255) NOT NULL,
       customer_code VARCHAR(255) NOT NULL,
@@ -247,6 +299,7 @@ async function main() {
       material VARCHAR(255),
       tech_requirement TEXT,
       urgent BOOLEAN DEFAULT false,
+      attachments TEXT[] DEFAULT '{}',
       _created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
       _created_by VARCHAR(255),
       _updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -255,7 +308,7 @@ async function main() {
 
     CREATE TABLE IF NOT EXISTS outbound_order (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      outbound_no VARCHAR(255) NOT NULL,
+      outbound_no VARCHAR(255) NOT NULL UNIQUE,
       customer_id UUID NOT NULL REFERENCES customer(id),
       customer_name VARCHAR(255) NOT NULL,
       customer_code VARCHAR(255) NOT NULL,
@@ -269,6 +322,8 @@ async function main() {
       total_amount_cents INTEGER DEFAULT 0,
       total_quantity INTEGER DEFAULT 0,
       total_weight DOUBLE PRECISION DEFAULT 0,
+      weight DOUBLE PRECISION DEFAULT 0,
+      unit_price DOUBLE PRECISION DEFAULT 0,
       status VARCHAR(50) DEFAULT 'pending_reconciliation',
       lock_status VARCHAR(50) DEFAULT 'unlocked',
       locked_at TIMESTAMPTZ,
@@ -297,6 +352,7 @@ async function main() {
       amount DOUBLE PRECISION DEFAULT 0,
       batch_no VARCHAR(255),
       inbound_date TIMESTAMPTZ,
+      close_order BOOLEAN NOT NULL DEFAULT false,
       _created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
       _created_by VARCHAR(255),
       _updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -445,6 +501,7 @@ async function main() {
       approved_at TIMESTAMPTZ,
       rejected_at TIMESTAMPTZ,
       reject_reason TEXT,
+      payload JSONB,
       _created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
       _created_by VARCHAR(255),
       _updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -502,13 +559,44 @@ async function main() {
   `;
 
   await db.exec(tables);
+
+  // Existing Railway databases are upgraded in-place. Every statement is idempotent,
+  // so startup can safely run this block on each deploy and on every new tenant DB.
+  await db.exec(`
+    ALTER TABLE inbound_detail ADD COLUMN IF NOT EXISTS attachments TEXT[] DEFAULT '{}';
+    ALTER TABLE app_user ADD COLUMN IF NOT EXISTS email VARCHAR(255);
+    ALTER TABLE app_user ADD COLUMN IF NOT EXISTS phone VARCHAR(50);
+    ALTER TABLE app_user ADD COLUMN IF NOT EXISTS avatar TEXT;
+    ALTER TABLE app_user ADD COLUMN IF NOT EXISTS position VARCHAR(255);
+    ALTER TABLE app_user ADD COLUMN IF NOT EXISTS location VARCHAR(255);
+    ALTER TABLE product ADD COLUMN IF NOT EXISTS batch_no VARCHAR(255);
+    ALTER TABLE outbound_detail ADD COLUMN IF NOT EXISTS close_order BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE outbound_order ADD COLUMN IF NOT EXISTS weight DOUBLE PRECISION DEFAULT 0;
+    ALTER TABLE outbound_order ADD COLUMN IF NOT EXISTS unit_price DOUBLE PRECISION DEFAULT 0;
+    ALTER TABLE outbound_order ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE reconciliation_detail ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE reconciliation_detail ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;
+    ALTER TABLE reconciliation_detail ADD COLUMN IF NOT EXISTS update_reason TEXT;
+    ALTER TABLE approval_request ADD COLUMN IF NOT EXISTS payload JSONB;
+    ALTER TABLE product_batch_stock ADD COLUMN IF NOT EXISTS product_id UUID;
+    UPDATE product_batch_stock stock
+      SET product_id = batch.product_id
+      FROM product_batch batch
+      WHERE stock.batch_id = batch.id AND stock.product_id IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_inbound_order_no ON inbound_order(inbound_no);
+    CREATE INDEX IF NOT EXISTS idx_outbound_order_no ON outbound_order(outbound_no);
+    CREATE INDEX IF NOT EXISTS idx_outbound_batch_detail_outbound ON outbound_batch_detail(outbound_detail_id);
+    CREATE INDEX IF NOT EXISTS idx_product_batch_stock_product ON product_batch_stock(product_id);
+    CREATE INDEX IF NOT EXISTS idx_reconciliation_detail_active ON reconciliation_detail(reconciliation_id, is_active);
+    CREATE INDEX IF NOT EXISTS idx_approval_request_status ON approval_request(status, type);
+  `);
   console.log("Tables created successfully!");
 
   // Step 3: Seed default data
   const { rows } = await db.query(`SELECT COUNT(*) as cnt FROM organization`);
   const count = Number((rows[0] as any).cnt);
   
-  if (count === 0) {
+  if (count === 0 && process.env.NODE_ENV !== 'production' && !targetUrl) {
     console.log("Seeding default organization...");
     await db.exec(`INSERT INTO organization (code, name, db_name, status) VALUES ('default', '默认组织', 'db_tenant_default', 'active')`);
     console.log("Default organization created (code: 'default')");
@@ -529,4 +617,9 @@ async function main() {
   await db.close();
 }
 
-main().catch(console.error);
+if (require.main === module) {
+  initializeDatabase().catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

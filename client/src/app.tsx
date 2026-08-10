@@ -36,9 +36,10 @@ import { TenantProvider, needsTenantSelection } from './contexts/TenantContext';
 // 登录保护路由
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const user = getCurrentUser();
+  const authToken = localStorage.getItem('authToken');
   const location = useLocation();
 
-  if (!user) {
+  if (!user || !authToken) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
@@ -52,8 +53,9 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 // 已登录用户跳转
 const PublicRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const user = getCurrentUser();
+  const authToken = localStorage.getItem('authToken');
 
-  if (user) {
+  if (user && authToken) {
     return <Navigate to="/dashboard" replace />;
   }
 

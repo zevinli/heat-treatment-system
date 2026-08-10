@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { MiddlewareConsumer } from '@nestjs/common';
 
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
@@ -23,11 +23,15 @@ import { AdminModule } from './modules/admin/admin.module';
 import { TenantModule } from './modules/tenant/tenant.module';
 import { TenantConnectionService } from './modules/tenant/tenant-connection.service';
 import { AuthMiddleware } from './common/middleware/auth.middleware';
+import { TenantMiddleware } from './common/middleware/tenant.middleware';
+import { AuthModule } from './modules/auth/auth.module';
+import { AuthGuard } from './modules/auth/auth.guard';
 
 @Module({
   imports: [
     // 平台 Module，提供平台能力
     PlatformModule.forRoot(),
+    AuthModule,
     // ====== @route-section: business-modules START ======
     // Place all business modules here.Do NOT add fallback modules here.
     // 租户模块需要最先加载，用于中间件拦截和上下文设置
@@ -60,11 +64,17 @@ import { AuthMiddleware } from './common/middleware/auth.middleware';
       provide: APP_INTERCEPTOR,
       useClass: LoggingInterceptor,
     },
+    {
+      provide: APP_GUARD,
+      useClass: AuthGuard,
+    },
   ],
 })
 export class AppModule {
   configure(consumer: MiddlewareConsumer) {
     consumer
-      .apply(AuthMiddleware)
+      // 顺序不可交换：租户中间件必须在认证信息写入 userContext 后，
+      // 才能可靠校验当前用户是否属于请求指定的组织。
+      .apply(AuthMiddleware, TenantMiddleware)
       .forRoutes('*');
   }}

@@ -1,9 +1,9 @@
 import { Injectable, Inject, Logger, BadRequestException } from '@nestjs/common';
 import { eq, like, and, sql, inArray, isNull } from 'drizzle-orm';
 import {
-  DRIZZLE_DATABASE,
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
+import { TENANT_DATABASE } from '../../common/tenant-database.provider';
 import { 
   productTable, 
   productMaterialThresholdTable,
@@ -20,7 +20,7 @@ export class ProductService {
   private readonly logger = new Logger(ProductService.name);
 
   constructor(
-    @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
   ) {}
 
   // 获取所有产品 - 过滤已删除的，支持多客户查询

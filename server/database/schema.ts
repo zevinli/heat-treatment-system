@@ -137,6 +137,7 @@ export const approvalRequest = pgTable("approval_request", {
   approvedAt: customTimestamptz('approved_at'),
   rejectedAt: customTimestamptz('rejected_at'),
   rejectReason: text("reject_reason"),
+  payload: jsonb(),
   // System field: Creation time (auto-filled, do not modify)
   createdAt: customTimestamptz('_created_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
   // System field: Creator (auto-filled, do not modify)
@@ -153,6 +154,38 @@ export const approvalRequest = pgTable("approval_request", {
   pgPolicy("修改全部数据", { as: "permissive", for: "all", to: ["authenticated_workspace_aadjpstn2w2ds"] }),
   pgPolicy("查看全部数据", { as: "permissive", for: "select", to: ["anon_workspace_aadjpstn2w2ds", "authenticated_workspace_aadjpstn2w2ds"] }),
   pgPolicy("修改本人数据", { as: "permissive", for: "all", to: ["authenticated_workspace_aadjpstn2w2ds"] }),
+]);
+
+export const appUser = pgTable("app_user", {
+  id: uuid().defaultRandom().notNull(),
+  username: varchar({ length: 100 }).notNull(),
+  passwordHash: text("password_hash").notNull(),
+  name: varchar({ length: 255 }).notNull(),
+  role: varchar({ length: 50 }).default('viewer').notNull(),
+  department: varchar({ length: 255 }),
+  email: varchar({ length: 255 }),
+  phone: varchar({ length: 50 }),
+  avatar: text(),
+  position: varchar({ length: 255 }),
+  location: varchar({ length: 255 }),
+  status: varchar({ length: 50 }).default('active').notNull(),
+  deviceLimit: integer("device_limit").default(3).notNull(),
+  lastLoginAt: customTimestamptz('last_login_at'),
+  createdAt: customTimestamptz('_created_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
+  updatedAt: customTimestamptz('_updated_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
+}, table => [uniqueIndex("idx_app_user_username").on(table.username)]);
+
+export const authSession = pgTable("auth_session", {
+  id: uuid().defaultRandom().notNull(),
+  userId: uuid("user_id").notNull(),
+  tokenId: varchar("token_id", { length: 128 }).notNull(),
+  deviceName: varchar("device_name", { length: 255 }),
+  expiresAt: customTimestamptz('expires_at').notNull(),
+  revokedAt: customTimestamptz('revoked_at'),
+  createdAt: customTimestamptz('_created_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
+}, table => [
+  uniqueIndex("idx_auth_session_token").on(table.tokenId),
+  index("idx_auth_session_user").on(table.userId),
 ]);
 
 export const customer = pgTable("customer", {
@@ -279,6 +312,7 @@ export const outboundDetail = pgTable("outbound_detail", {
   amount: doublePrecision().default(0),
   batchNo: varchar("batch_no", { length: 255 }),
   inboundDate: customTimestamptz('inbound_date'),
+  closeOrder: boolean("close_order").default(false).notNull(),
   // System field: Creation time (auto-filled, do not modify)
   createdAt: customTimestamptz('_created_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
   // System field: Creator (auto-filled, do not modify)
@@ -492,6 +526,7 @@ export const outboundOrder = pgTable("outbound_order", {
   cancelReason: text("cancel_reason"),
   version: integer().default(1).notNull(),
 }, (table) => [
+  uniqueIndex("idx_outbound_order_no").using("btree", table.outboundNo.asc().nullsLast().op("text_ops")),
   index("idx_outbound_order_customer").using("btree", table.customerId.asc().nullsLast().op("uuid_ops")),
   index("idx_outbound_order_reconciliation").using("btree", table.reconciliationId.asc().nullsLast().op("uuid_ops")),
   pgPolicy("service_role_bypass_policy", { as: "permissive", for: "all", to: ["service_role_workspace_aadjpstn2w2ds"], using: sql`true` }),
@@ -666,6 +701,7 @@ export const inboundOrder = pgTable("inbound_order", {
   // System field: Updater (auto-filled, do not modify)
   updatedBy: userProfile("_updated_by"),
 }, (table) => [
+  uniqueIndex("idx_inbound_order_no").using("btree", table.inboundNo.asc().nullsLast().op("text_ops")),
   index("idx_inbound_order_customer").using("btree", table.customerId.asc().nullsLast().op("uuid_ops")),
   pgPolicy("查看全部入库单数据", { as: "permissive", for: "select", to: ["authenticated_workspace_aadjpstn2w2ds"], using: sql`true` }),
   pgPolicy("修改全部入库单数据", { as: "permissive", for: "all", to: ["authenticated_workspace_aadjpstn2w2ds"] }),
@@ -692,6 +728,7 @@ export const inboundDetail = pgTable("inbound_detail", {
   material: varchar({ length: 255 }),
   techRequirement: text("tech_requirement"),
   urgent: boolean().default(false),
+  attachments: text().array().default(sql`'{}'::text[]`),
   // System field: Creation time (auto-filled, do not modify)
   createdAt: customTimestamptz('_created_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
   // System field: Creator (auto-filled, do not modify)
@@ -714,6 +751,7 @@ export const inboundDetail = pgTable("inbound_detail", {
 export const productBatchStock = pgTable("product_batch_stock", {
   id: uuid().defaultRandom().notNull(),
   batchId: uuid("batch_id").notNull(),
+  productId: uuid("product_id").notNull(),
   quantityAvailable: integer("quantity_available").default(0).notNull(),
   weightAvailable: doublePrecision("weight_available").default(0).notNull(),
   lockedQuantity: integer("locked_quantity").default(0).notNull(),
@@ -793,7 +831,7 @@ export const statisticsDaily = pgTable("statistics_daily", {
 
 export const outboundBatchDetail = pgTable("outbound_batch_detail", {
   id: uuid().defaultRandom().notNull(),
-  outboundDetailId: uuid("outbound_id").notNull(),
+  outboundDetailId: uuid("outbound_detail_id").notNull(),
   batchId: uuid("batch_id").notNull(),
   quantity: integer().notNull(),
   weight: doublePrecision().notNull(),
@@ -904,6 +942,8 @@ export const inventoryOverdueWarningInWorkspaceAadjpstn2W2Ds = pgView("inventory
 
 // table aliases
 export const approvalRequestTable = approvalRequest;
+export const appUserTable = appUser;
+export const authSessionTable = authSession;
 export const customerTable = customer;
 export const inboundDetailTable = inboundDetail;
 export const inboundOrderTable = inboundOrder;

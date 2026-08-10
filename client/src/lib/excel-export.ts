@@ -3,7 +3,7 @@
  * 支持将表格数据导出为格式化的 Excel 文件
  */
 
-import * as XLSX from 'xlsx';
+import * as XLSX from '@e965/xlsx';
 import { logger } from '@lark-apaas/client-toolkit/logger';
 import { toast } from 'sonner';
 

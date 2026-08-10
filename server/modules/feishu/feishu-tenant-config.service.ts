@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Inject, Logger, NotFoundException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import {
   DRIZZLE_DATABASE,
@@ -99,9 +99,20 @@ export class FeishuTenantConfigService {
 
   /** 保存或更新组织的飞书配置 */
   async saveConfig(orgCode: string, config: Partial<Omit<FeishuTenantConfig, 'orgCode'>>): Promise<void> {
-    await this.db
+    const existing = await this.getConfig(orgCode);
+    const merged = {
+      ...(existing || {}),
+      ...config,
+      isActive: config.isActive ?? existing?.isActive ?? false,
+    };
+    if (merged.isActive && (!merged.bitableAppToken || !merged.tableInbound || !merged.tableOutbound || !merged.tableInventory || !merged.tableCustomer || !merged.tableReconciliation)) {
+      throw new BadRequestException('启用飞书同步前必须填写 App Token 和五个业务表 ID');
+    }
+    const [updated] = await this.db
       .update(organization)
-      .set({ feishuConfig: config as any })
-      .where(eq(organization.code, orgCode));
+      .set({ feishuConfig: merged as any })
+      .where(eq(organization.code, orgCode))
+      .returning({ id: organization.id });
+    if (!updated) throw new NotFoundException('组织不存在');
   }
 }

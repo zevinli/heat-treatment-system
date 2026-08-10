@@ -271,6 +271,7 @@ interface DataContextType {
   addReconciliation: (reconciliation: Omit<IReconciliation, 'id'>) => Promise<IReconciliation>;
   updateReconciliation: (id: string, data: Partial<IReconciliation>) => Promise<void>;
   deleteReconciliation: (id: string, outboundOrderIds?: string[]) => Promise<void>;
+  confirmReconciliation: (id: string) => Promise<void>;
   auditReconciliation: (id: string, auditorName: string) => Promise<void>;
   unauditReconciliation: (id: string, reason?: string) => Promise<void>;
   recordInvoice: (id: string, amount: number) => Promise<void>;
@@ -429,8 +430,22 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setLoading(true);
       const response = await api.getCustomers();
       // API 返回 { items: [...] } 格式，提取数组
-      const data = Array.isArray(response) ? response : response?.items || [];
-      setCustomers(data);
+      const data = response.items || [];
+      setCustomers(data.map(item => ({
+        id: item.id,
+        code: item.code,
+        name: item.name,
+        contact: item.contact || '',
+        phone: item.phone || '',
+        address: item.address || '',
+        transport: item.transport || '',
+        paymentTerm: item.paymentTerm || '',
+        deliveryDirection: item.deliveryDirection || '',
+        settlement: item.settlement || '',
+        category: item.category || '',
+        inboundCount: item.inboundCount || 0,
+        status: item.status === 'inactive' ? 'inactive' : 'active',
+      })));
     } catch (error) {
       logger.error('加载客户数据失败', error);
       toast.error('加载客户数据失败');
@@ -444,8 +459,31 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setLoading(true);
       const response = await api.getProducts();
       // API 返回 { items: [...] } 格式，提取数组
-      const data = Array.isArray(response) ? response : response?.items || [];
-      setProducts(data);
+      const data = response.items || [];
+      setProducts(data.map(item => ({
+        id: item.id,
+        code: item.code,
+        name: item.name,
+        material: item.material || '',
+        process: item.process || '',
+        techRequirement: item.techRequirement || '',
+        workpieceNo: item.workpieceNo || '',
+        unit: item.unit || '件',
+        unitPrice: item.unitPrice || 0,
+        customerCode: item.customerCode,
+        customerName: item.customerName,
+        stock: item.stock || 0,
+        stockWeight: item.stockWeight || 0,
+        inboundQuantity: item.inboundQuantity || 0,
+        inboundWeight: item.inboundWeight || 0,
+        inboundDate: item.inboundDate || '',
+        batchNo: item.batchNo || '',
+        status: item.status === 'incomplete' ? 'incomplete' : 'complete',
+        warningThreshold: item.warningThreshold,
+        attachments: item.attachments,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      })));
     } catch (error) {
       logger.error('加载产品数据失败', error);
       toast.error('加载产品数据失败');
@@ -784,7 +822,7 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   }, [products]);
 
   // ========== 出库单管理 ==========
-  const addOutboundOrder = useCallback(async (order: Omit<IOutboundOrder, 'id' | 'createdAt' | 'status'>) => {
+  const addOutboundOrder = useCallback(async (order: Omit<IOutboundOrder, 'id' | 'createdAt' | 'status' | 'outboundNo'> & { outboundNo?: string }) => {
     try {
       // 不再传 outboundNo，由后端自动生成
       const { outboundNo: _, ...orderWithoutNo } = order;
@@ -914,21 +952,32 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   }, []);
 
+  const confirmReconciliation = useCallback(async (id: string) => {
+    try {
+      const updated = await api.confirmReconciliation(id);
+      setReconciliations(prev => prev.map(r => r.id === id ? { ...r, ...updated } : r));
+      toast.success('对账单已确认');
+    } catch (error: any) {
+      toast.error(error.message || '确认失败');
+      throw error;
+    }
+  }, []);
+
   const unauditReconciliation = useCallback(async (id: string, reason?: string) => {
     const reconciliation = reconciliations.find(r => r.id === id);
     if (!reconciliation) return;
 
     try {
       // 调用后端反审核接口
-      await api.unauditReconciliation(id, reason);
+      await api.unauditReconciliation(id, reason || '');
       
-      // 刷新对账单列表（后端反审核后状态变为 voided，需要重新生成对账单）
+      // 反审核回到草稿，保留关联与版本历史，可修改后再次确认、审核。
       await refreshReconciliations();
       
       // 刷新出库单列表（关联出库单已解除锁定）
       await refreshOutboundOrders();
       
-      toast.success('反审核成功，对账单已作废，关联出库单已回退到待对账列表');
+      toast.success('反审核成功，对账单已回到草稿');
     } catch (error: any) {
       toast.error(error.message || '反审核失败');
       throw error;
@@ -1229,6 +1278,7 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         addReconciliation,
         updateReconciliation,
         deleteReconciliation,
+        confirmReconciliation,
         auditReconciliation,
         unauditReconciliation,
         recordInvoice,

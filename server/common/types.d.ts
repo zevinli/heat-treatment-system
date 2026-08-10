@@ -7,6 +7,7 @@ declare namespace Express {
       orgCode?: string;
       userRole?: string;
       permissions?: string[];
+      tokenId?: string;
     };
     organizationId?: string;
     __platform_data__?: Record<string, any>;

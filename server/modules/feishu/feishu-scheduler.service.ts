@@ -2,6 +2,10 @@ import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/commo
 import { FeishuAuthService } from './feishu-auth.service';
 import { FeishuTenantConfigService } from './feishu-tenant-config.service';
 import { SYNC_CONFIG } from './constants';
+import { TenantConnectionService } from '../tenant/tenant-connection.service';
+import { BitableSyncService } from './bitable-sync.service';
+import { productTable } from '../../database/schema';
+import { isNull } from 'drizzle-orm';
 
 /**
  * 多租户库存定时同步调度器
@@ -15,6 +19,8 @@ export class FeishuSchedulerService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly auth: FeishuAuthService,
     private readonly configService: FeishuTenantConfigService,
+    private readonly tenantConnections: TenantConnectionService,
+    private readonly sync: BitableSyncService,
   ) {}
 
   onModuleInit() {
@@ -45,11 +51,29 @@ export class FeishuSchedulerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`扫描到 ${configs.length} 个组织开通了飞书`);
 
       for (const config of configs) {
-        this.logger.log(`[${config.orgCode}] 库存/质检/工艺同步待接入（需 DB 查询租户数据）`);
-        // 质检表同步: quality_inspection 表 → 飞书质检记录表
-        // 工艺表同步: product_batch 表 → 飞书工艺参数表
-        // 注意：此处需通过 TenantConnectionService 获取租户 DB 才能查库存
-        // 当前版本先记录日志，完整实现需注入 TenantConnectionService
+        try {
+          const db = await this.tenantConnections.getTenantDb(config.orgCode);
+          const products = await db.select({
+            productName: productTable.name,
+            material: productTable.material,
+            currentStock: productTable.stock,
+            unit: productTable.unit,
+            batchNo: productTable.batchNo,
+            inboundDate: productTable.inboundDate,
+          }).from(productTable).where(isNull(productTable.deletedAt));
+          const result = await this.sync.syncInventoryFull(products.map(item => ({
+            productName: item.productName,
+            material: item.material || '',
+            currentStock: item.currentStock || 0,
+            unit: item.unit || '件',
+            location: '默认库位',
+            batchNo: item.batchNo || '',
+            inboundDate: item.inboundDate?.toISOString() || '',
+          })), config.orgCode);
+          this.logger.log(`[${config.orgCode}] 飞书库存同步完成，共 ${result.affected} 条`);
+        } catch (error: any) {
+          this.logger.error(`[${config.orgCode}] 飞书库存同步失败：${error.message}`);
+        }
       }
     } catch (error: any) {
       this.logger.error(`库存调度异常：${error.message}`);

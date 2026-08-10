@@ -2,6 +2,8 @@ import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenEx
 import { eq, and, like, desc, sql } from 'drizzle-orm';
 import { DRIZZLE_DATABASE } from '@lark-apaas/fullstack-nestjs-core';
 import { organization, organizationUser, organizationInvite } from '../../database/schema';
+import { TenantConnectionService } from './tenant-connection.service';
+import { randomInt } from 'crypto';
 
 export interface CreateOrganizationDto {
   code: string;
@@ -42,6 +44,7 @@ export class TenantService {
 
   constructor(
     @Inject(DRIZZLE_DATABASE) private readonly masterDb: any,
+    private readonly tenantConnections: TenantConnectionService,
   ) {}
 
   /**
@@ -59,8 +62,30 @@ export class TenantService {
       throw new BadRequestException(`Organization code '${dto.code}' already exists`);
     }
 
-    // 自动生成数据库名称（如果未提供）
+    const masterUrl = process.env.DATABASE_URL || process.env.SUDA_DATABASE_URL;
+    let masterConfig: URL | undefined;
+    if (masterUrl) {
+      try { masterConfig = new URL(masterUrl); } catch { /* validation below */ }
+    }
+
+    // 默认在同一个受管 PostgreSQL 集群中创建独立数据库。
     const dbName = `db_tenant_${dto.code}`;
+    const dbHost = dto.dbHost || masterConfig?.hostname;
+    const dbPort = dto.dbPort || Number(masterConfig?.port || 5432);
+    const dbUser = dto.dbUser || (masterConfig ? decodeURIComponent(masterConfig.username) : undefined);
+    const dbPassword = dto.dbPassword || (masterConfig ? decodeURIComponent(masterConfig.password) : undefined);
+    if (process.env.NODE_ENV === 'production' && (!dbHost || !dbUser || !dbPassword)) {
+      throw new BadRequestException('无法从主数据库推导租户数据库配置，请提供完整数据库连接信息');
+    }
+
+    await this.tenantConnections.provisionTenantDatabase({
+      code: dto.code,
+      dbName,
+      dbHost: dbHost || null,
+      dbPort,
+      dbUser: dbUser || null,
+      dbPassword: dbPassword || null,
+    });
 
     // 创建组织记录
     const result = await this.masterDb
@@ -69,10 +94,10 @@ export class TenantService {
         code: dto.code,
         name: dto.name,
         dbName: dbName,
-        dbHost: dto.dbHost || 'localhost',
-        dbPort: dto.dbPort || 5432,
-        dbUser: dto.dbUser || `tenant_${dto.code}`,
-        dbPassword: dto.dbPassword || this.generateRandomPassword(),
+        dbHost,
+        dbPort,
+        dbUser,
+        dbPassword,
         maxUsers: dto.maxUsers || 50,
         maxStorageGb: dto.maxStorageGb || 10,
         expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : undefined,
@@ -392,7 +417,7 @@ export class TenantService {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
     let password = '';
     for (let i = 0; i < 16; i++) {
-      password += chars.charAt(Math.floor(Math.random() * chars.length));
+      password += chars.charAt(randomInt(chars.length));
     }
     return password;
   }
@@ -404,7 +429,7 @@ export class TenantService {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let code = '';
     for (let i = 0; i < 8; i++) {
-      code += chars.charAt(Math.floor(Math.random() * chars.length));
+      code += chars.charAt(randomInt(chars.length));
     }
     return code;
   }

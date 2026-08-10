@@ -1,9 +1,9 @@
 import { Injectable, Inject } from '@nestjs/common';
 import { eq, and, gte, lte, sql, desc, ne } from 'drizzle-orm';
 import {
-  DRIZZLE_DATABASE,
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
+import { TENANT_DATABASE } from '../../common/tenant-database.provider';
 import {
   inboundOrderTable,
   inboundDetailTable,
@@ -19,7 +19,7 @@ import {
 @Injectable()
 export class AdminService {
   constructor(
-    @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
   ) {}
 
   private getDateRange(period: 'today' | 'week' | 'month' | 'year') {

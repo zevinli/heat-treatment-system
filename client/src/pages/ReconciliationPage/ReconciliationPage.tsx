@@ -15,7 +15,7 @@ import { useData, IOutboundOrder, IReconciliation, ReconciliationStatus, IOutbou
 import { ICustomer } from '@/data/mockData';
 import { exportToExcel, getReconciliationExportColumns } from '@/utils/excelExport';
 import { getReconciliationHistory } from '@/api';
-import { triggerPrint } from '@/lib/excel-export';
+import { smartPrint, exportElementToPdf } from '@/lib/print-service';
 import {
   Filter,
   FilterContent,
@@ -102,6 +102,7 @@ const ReconciliationPage: React.FC = () => {
     updateReconciliation,
     deleteReconciliation,
     auditReconciliation,
+    confirmReconciliation,
     unauditReconciliation,
     recordInvoice,
     recordReceipt,
@@ -316,7 +317,7 @@ const ReconciliationPage: React.FC = () => {
   const calculateAmounts = () => {
     const selectedOrders = filteredPendingOrders.filter(o => selectedOutboundIds.includes(o.id));
     const totalAmount = selectedOrders.reduce((sum, o) => sum + o.totalAmount, 0);
-    const finalAmount = totalAmount - deductionAmount + otherAmount - compensationAmount;
+    const finalAmount = totalAmount - deductionAmount + otherAmount + compensationAmount;
     return { totalAmount, finalAmount };
   };
 
@@ -409,8 +410,8 @@ const ReconciliationPage: React.FC = () => {
       deductionAmount,
       otherAmount,
       compensationAmount,
-      finalAmount: selectedReconciliation.totalAmount - deductionAmount + otherAmount - compensationAmount,
-      unreceivedAmount: selectedReconciliation.totalAmount - deductionAmount + otherAmount - compensationAmount - selectedReconciliation.receiptAmount,
+      finalAmount: selectedReconciliation.totalAmount - deductionAmount + otherAmount + compensationAmount,
+      unreceivedAmount: selectedReconciliation.totalAmount - deductionAmount + otherAmount + compensationAmount - selectedReconciliation.receiptAmount,
     });
 
     toast.success('对账单更新成功');
@@ -785,6 +786,20 @@ const ReconciliationPage: React.FC = () => {
             <FileText className="w-4 h-4" />
           </Button>
           {/* 审核按钮：仅已确认状态显示 */}
+          {record.status === 'draft' && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-primary border-primary/30 hover:bg-primary/10 text-xs px-2"
+              onClick={async () => {
+                try { await confirmReconciliation(record.id); } catch { /* DataContext 已提示 */ }
+              }}
+              title="确认对账单"
+            >
+              <CheckCircle className="w-3 h-3 mr-1" />
+              确认
+            </Button>
+          )}
           {record.status === 'confirmed' && (
             <Button
               size="sm"
@@ -2176,10 +2191,21 @@ const ReconciliationPage: React.FC = () => {
           <PrintPreview />
           <div className="flex justify-end gap-2 mt-4">
             <Button variant="outline" onClick={() => setPrintDialogOpen(false)}>关闭</Button>
-            <Button onClick={() => { 
-              triggerPrint('print-preview-content');
-              toast.success('打印任务已发送'); 
-              setTimeout(() => setPrintDialogOpen(false), 500);
+            <Button variant="outline" onClick={async () => {
+              try {
+                await exportElementToPdf('print-preview-content', selectedReconciliation?.reconciliationNo || '对账单');
+                toast.success('PDF导出成功');
+              } catch (error: any) {
+                toast.error(error?.message || 'PDF导出失败');
+              }
+            }}>
+              <FileDown className="w-4 h-4 mr-1" /> 导出PDF
+            </Button>
+            <Button onClick={async () => {
+              try {
+                await smartPrint('print-preview-content', '对账单');
+                setTimeout(() => setPrintDialogOpen(false), 500);
+              } catch { /* smartPrint 已提示 */ }
             }}>
               <Printer className="w-4 h-4 mr-1" /> 打印
             </Button>

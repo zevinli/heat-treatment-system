@@ -1,11 +1,10 @@
 import { Injectable, Inject, Logger, BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { BitableSyncService } from '../feishu/bitable-sync.service';
-import { eq, and, gte, lte, desc, sql, type SQL } from 'drizzle-orm';
-import { randomUUID } from 'crypto';
+import { eq, and, gte, lte, desc, asc, sql, isNull, type SQL } from 'drizzle-orm';
 import {
-  DRIZZLE_DATABASE,
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
+import { TENANT_DATABASE } from '../../common/tenant-database.provider';
 import { 
   outboundOrder, 
   outboundDetail, 
@@ -27,6 +26,7 @@ import {
 import { yuanToCents } from '../../common/utils/currency';
 import { checkUndoable } from '../../common/utils/undo-check.util';
 import { PAGINATION } from '../../config/constants';
+import { getCurrentTenantContext } from '../../common/tenant-context.storage';
 
 export interface OutboundDetailWithBatch {
   productId: string;
@@ -55,7 +55,7 @@ export class OutboundService {
   private readonly logger = new Logger(OutboundService.name);
 
   constructor(
-    @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
     private readonly bitableSyncService?: BitableSyncService,
   ) {}
 
@@ -195,16 +195,26 @@ export class OutboundService {
     totalWeight: number;
     details: Array<OutboundDetailWithBatch>;
   }) {
-    // 自动从 details 计算总计（当前端未传或为 0/NaN 时）
-    const totalAmount = data.totalAmount && !isNaN(data.totalAmount) && data.totalAmount > 0
-      ? data.totalAmount
-      : data.details.reduce((sum, d) => sum + ((d.unitPrice || 0) * (d.quantity || 0)), 0);
-    const totalQuantity = data.totalQuantity && !isNaN(data.totalQuantity) && data.totalQuantity > 0
-      ? data.totalQuantity
-      : data.details.reduce((sum, d) => sum + (d.quantity || 0), 0);
-    const totalWeight = data.totalWeight && !isNaN(data.totalWeight) && data.totalWeight > 0
-      ? data.totalWeight
-      : data.details.reduce((sum, d) => sum + (d.weight || 0), 0);
+    if (!Array.isArray(data.details) || data.details.length === 0) {
+      throw new BadRequestException('出库明细不能为空');
+    }
+
+    let details = data.details.map((detail, index) => {
+      const quantity = Number(detail.quantity);
+      const weight = Number(detail.weight || 0);
+      const unitPrice = Number(detail.unitPrice || 0);
+      const amount = Number(detail.amount || 0);
+      if (!Number.isInteger(quantity) || quantity <= 0) {
+        throw new BadRequestException(`第 ${index + 1} 行数量必须为正整数`);
+      }
+      if (!Number.isFinite(weight) || weight < 0) {
+        throw new BadRequestException(`第 ${index + 1} 行重量不能为负数`);
+      }
+      if (!Number.isFinite(unitPrice) || unitPrice < 0 || !Number.isFinite(amount) || amount < 0) {
+        throw new BadRequestException(`第 ${index + 1} 行金额或单价无效`);
+      }
+      return { ...detail, quantity, weight, unitPrice, amount };
+    });
 
     // 自动通过 customerCode 查找 customerId（若未传）
     let customerId = data.customerId;
@@ -217,6 +227,51 @@ export class OutboundService {
       if (cust) customerId = cust.id;
     }
     if (!customerId) throw new BadRequestException('客户不存在或未提供客户ID');
+    const [customerRecord] = await this.db
+      .select({ id: customer.id, name: customer.name, code: customer.code, deletedAt: customer.deletedAt })
+      .from(customer)
+      .where(eq(customer.id, customerId))
+      .limit(1);
+    if (!customerRecord || customerRecord.deletedAt) {
+      throw new BadRequestException('客户不存在或已停用');
+    }
+
+    details = await Promise.all(details.map(async (detail: any, index: number) => {
+      let productRecord;
+      if (detail.productId) {
+        [productRecord] = await this.db.select().from(productTable)
+          .where(eq(productTable.id, detail.productId)).limit(1);
+      } else if (detail.productCode) {
+        [productRecord] = await this.db.select().from(productTable)
+          .where(eq(productTable.code, detail.productCode)).limit(1);
+      }
+      if (!productRecord || productRecord.deletedAt || productRecord.status === 'inactive') {
+        throw new BadRequestException(`第 ${index + 1} 行产品不存在或已停用`);
+      }
+      if (productRecord.customerCode !== customerRecord.code) {
+        throw new BadRequestException(`产品 ${productRecord.name} 不属于客户 ${customerRecord.name}`);
+      }
+      const unit = productRecord.unit || '件';
+      if (unit === 'kg' && detail.weight <= 0) throw new BadRequestException(`产品 ${productRecord.name} 必须填写重量`);
+      const unitPrice = Number(productRecord.unitPrice || 0);
+      const billingQuantity = unit === 'kg' ? detail.weight : detail.quantity;
+      return {
+        ...detail,
+        productId: productRecord.id,
+        productName: productRecord.name,
+        workpieceNo: productRecord.workpieceNo,
+        material: productRecord.material,
+        process: productRecord.process,
+        unit,
+        unitPrice,
+        amount: Math.round(unitPrice * billingQuantity * 100) / 100,
+      };
+    }));
+
+    // 数量、重量、金额均从经过主数据校正的服务端明细汇总。
+    const totalAmount = details.reduce((sum, d) => sum + d.amount, 0);
+    const totalQuantity = details.reduce((sum, d) => sum + d.quantity, 0);
+    const totalWeight = details.reduce((sum, d) => sum + d.weight, 0);
 
     // 自动生成或验证出库单号
     const outboundNo = data.outboundNo || await this.generateOutboundNo();
@@ -232,17 +287,13 @@ export class OutboundService {
       throw new ConflictException(`出库单号 ${outboundNo} 已存在`);
     }
 
-    // 计算金额转分
     const totalAmountCents = yuanToCents(totalAmount);
-
-    // 创建出库单
-    const orderResult = await this.db
-      .insert(outboundOrder)
-      .values({
+    const order = await this.db.transaction(async (tx) => {
+      const [createdOrder] = await tx.insert(outboundOrder).values({
         outboundNo,
         customerId,
-        customerName: data.customerName,
-        customerCode: data.customerCode,
+        customerName: customerRecord.name,
+        customerCode: customerRecord.code,
         outboundDate: data.outboundDate,
         creator: data.creator,
         receiver: data.receiver || null,
@@ -255,246 +306,250 @@ export class OutboundService {
         totalAmountCents,
         status: 'pending_reconciliation',
         lockStatus: 'unlocked',
-      })
-      .returning();
-
-    const order = orderResult[0];
-
-    // 创建明细并扣减库存（按批次）
-    for (const rawDetail of data.details) {
-      // 自动通过 productCode 查找 productId（若未传）
-      let productId = (rawDetail as any).productId;
-      if (!productId && (rawDetail as any).productCode) {
-        const [prod] = await this.db
-          .select({ id: product.id })
-          .from(product)
-          .where(eq(product.code, (rawDetail as any).productCode))
-          .limit(1);
-        if (prod) productId = prod.id;
-      }
-      if (!productId) throw new BadRequestException(`产品不存在: ${(rawDetail as any).productCode || 'unknown'}`);
-      const detail = { ...rawDetail, productId };
-      // 检查产品是否存在且未删除
-      const [productRecord] = await this.db
-        .select({
-          id: productTable.id,
-          name: productTable.name,
-          stock: productTable.stock,
-          stockWeight: productTable.stockWeight,
-          deletedAt: productTable.deletedAt,
-        })
-        .from(productTable)
-        .where(eq(productTable.id, detail.productId));
-
-      if (!productRecord) {
-        throw new NotFoundException(`产品不存在: ${detail.productId}`);
-      }
-
-      if (productRecord.deletedAt) {
-        throw new BadRequestException(`产品 ${productRecord.name} 已删除，无法出库`);
-      }
-
-      // 创建出库明细
-      const [outboundDetailRecord] = await this.db.insert(outboundDetail).values({
-        outboundId: order.id,
-        productId: detail.productId,
-        productName: detail.productName,
-        workpieceNo: detail.workpieceNo || null,
-        material: detail.material || null,
-        process: detail.process || null,
-        unit: detail.unit || '件',
-        unitPrice: detail.unitPrice || 0,
-        quantity: detail.quantity,
-        weight: detail.weight,
-        amount: detail.amount,
-        batchNo: detail.batchSelections?.map(b => b.batchNo).join(',') || detail.batchNo || null,
-        inboundDate: detail.inboundDate || null,
       }).returning();
 
-      // 按批次扣减库存
-      if (detail.batchSelections && detail.batchSelections.length > 0) {
-        // 指定批次出库
-        for (const batchSelection of detail.batchSelections) {
-          // 检查批次状态和库存
-          const [batch] = await this.db
-            .select({
-              id: productBatchTable.id,
-              batchNo: productBatchTable.batchNo,
-            })
-            .from(productBatchTable)
-            .where(eq(productBatchTable.id, batchSelection.batchId));
-
-          if (!batch) {
-            throw new NotFoundException(`批次 ${batchSelection.batchNo} 不存在`);
-          }
-
-          // 扣减批次库存
-          const [batchStock] = await this.db
-            .select({
-              quantityAvailable: productBatchStockTable.quantityAvailable,
-              weightAvailable: productBatchStockTable.weightAvailable,
-            })
-            .from(productBatchStockTable)
-            .where(eq(productBatchStockTable.batchId, batchSelection.batchId));
-
-          if (!batchStock || batchStock.quantityAvailable < batchSelection.quantity) {
-            throw new BadRequestException(
-              `批次 ${batchSelection.batchNo} 可用库存不足`
-            );
-          }
-
-          await this.db
-            .update(productBatchStockTable)
-            .set({
-              quantityAvailable: sql`${productBatchStockTable.quantityAvailable} - ${batchSelection.quantity}`,
-              weightAvailable: sql`${productBatchStockTable.weightAvailable} - ${batchSelection.weight}`,
-            })
-            .where(eq(productBatchStockTable.batchId, batchSelection.batchId));
-
-          // 记录出库批次明细
-          if (outboundDetailRecord) {
-            await this.db.insert(outboundBatchDetailTable).values({
-              outboundDetailId: outboundDetailRecord.id,
-              batchId: batchSelection.batchId,
-              quantity: batchSelection.quantity,
-              weight: batchSelection.weight,
-            });
-          }
+      for (const rawDetail of details) {
+        let productId = rawDetail.productId;
+        if (!productId && (rawDetail as any).productCode) {
+          const [matched] = await tx.select({ id: product.id }).from(product)
+            .where(eq(product.code, (rawDetail as any).productCode)).limit(1);
+          productId = matched?.id;
         }
-      } else if (detail.batchNo) {
-        // 单一批次出库（向后兼容）
-        const [batch] = await this.db
-          .select({ id: productBatchTable.id })
-          .from(productBatchTable)
-          .where(eq(productBatchTable.batchNo, detail.batchNo));
-
-        if (!batch) {
-          throw new NotFoundException(`批次 ${detail.batchNo} 不存在`);
+        if (!productId) {
+          throw new BadRequestException(`产品不存在: ${(rawDetail as any).productCode || 'unknown'}`);
         }
 
-        await this.db
-          .update(productBatchStockTable)
-          .set({
-            quantityAvailable: sql`${productBatchStockTable.quantityAvailable} - ${detail.quantity}`,
-            weightAvailable: sql`${productBatchStockTable.weightAvailable} - ${detail.weight}`,
-          })
-          .where(eq(productBatchStockTable.batchId, batch.id));
+        const [productRecord] = await tx.select({
+          id: productTable.id,
+          name: productTable.name,
+          deletedAt: productTable.deletedAt,
+        }).from(productTable).where(eq(productTable.id, productId));
+        if (!productRecord || productRecord.deletedAt) {
+          throw new BadRequestException(`产品不存在或已删除: ${rawDetail.productName || productId}`);
+        }
 
-        // 记录出库批次明细
-        if (outboundDetailRecord) {
-          await this.db.insert(outboundBatchDetailTable).values({
-            outboundDetailId: outboundDetailRecord.id,
-            batchId: batch.id,
-            quantity: detail.quantity,
-            weight: detail.weight,
+        const detail = { ...rawDetail, productId };
+        const selections = await this.resolveBatchSelections(tx, detail);
+        const [createdDetail] = await tx.insert(outboundDetail).values({
+          outboundId: createdOrder.id,
+          productId,
+          productName: productRecord.name,
+          workpieceNo: detail.workpieceNo || null,
+          material: detail.material || null,
+          process: detail.process || null,
+          unit: detail.unit || '件',
+          unitPrice: detail.unitPrice,
+          quantity: detail.quantity,
+          weight: detail.weight,
+          amount: detail.amount,
+          batchNo: selections.map(item => item.batchNo).join(',') || null,
+          inboundDate: detail.inboundDate || null,
+          closeOrder: Boolean(detail.closeOrder),
+        }).returning();
+
+        for (const selection of selections) {
+          const [updated] = await tx.update(productBatchStockTable).set({
+            quantityAvailable: sql`${productBatchStockTable.quantityAvailable} - ${selection.quantity}`,
+            weightAvailable: sql`${productBatchStockTable.weightAvailable} - ${selection.weight}`,
+          }).where(and(
+            eq(productBatchStockTable.batchId, selection.batchId),
+            gte(productBatchStockTable.quantityAvailable, selection.quantity),
+            gte(productBatchStockTable.weightAvailable, selection.weight),
+            eq(productBatchStockTable.status, 'active'),
+          )).returning({ id: productBatchStockTable.id });
+          if (!updated) {
+            throw new ConflictException(`批次 ${selection.batchNo} 库存已变化，请刷新后重试`);
+          }
+          await tx.insert(outboundBatchDetailTable).values({
+            outboundDetailId: createdDetail.id,
+            batchId: selection.batchId,
+            quantity: selection.quantity,
+            weight: selection.weight,
           });
         }
+
+        await this.decreaseStockInTransaction(tx, {
+          productId,
+          quantity: detail.quantity,
+          weight: detail.weight,
+          referenceNo: createdOrder.outboundNo,
+          operator: createdOrder.creator || 'system',
+          remark: detail.closeOrder ? '出库并关单，剩余库存继续留存' : '出库单创建，扣减库存',
+        });
       }
 
-      // 扣减产品总库存（带乐观锁）
-      await this.decreaseStockWithLock({
-        productId: detail.productId,
-        quantity: detail.quantity,
-        weight: detail.weight || 0,
-        referenceNo: order.outboundNo,
-        operator: order.creator || 'system',
-        remark: '出库单创建，扣减库存',
+      await tx.insert(operationLogTable).values({
+        entityType: 'outbound_order',
+        entityId: createdOrder.id,
+        operation: 'create',
+        operator: data.creator as any,
+        afterState: JSON.stringify({
+          outboundNo: createdOrder.outboundNo,
+          customerId,
+          customerName: customerRecord.name,
+          totalQuantity,
+          totalWeight,
+          totalAmount,
+          details,
+        }),
+        source: 'web',
       });
-
-      // 处理关单逻辑
-      if (detail.closeOrder) {
-        await this.handleCloseOrder(detail.productId, customerId, order.id, order.outboundNo);
-      }
-    }
+      return createdOrder;
+    });
 
     // 同步到飞书多维表格（异步，不阻塞主流程）
-    this.syncToFeishuOutbound(order, data).catch(err =>
+    this.syncToFeishuOutbound(order, {
+      ...data,
+      customerName: customerRecord.name,
+      customerCode: customerRecord.code,
+      details,
+      totalAmount,
+      totalQuantity,
+      totalWeight,
+    }).catch(err =>
       this.logger.warn(`飞书同步发货记录失败：${err.message}`),
     );
-
-    // 记录操作日志
-    await this.db.insert(operationLogTable).values({
-      entityType: 'outbound_order',
-      entityId: order.id,
-      operation: 'create',
-      operator: data.creator as any,
-      afterState: JSON.stringify({
-        outboundNo: order.outboundNo,
-        customerId,
-        customerName: data.customerName,
-        totalQuantity,
-        totalWeight,
-        totalAmount,
-        details: data.details,
-      }),
-      source: 'web',
-    });
 
     return this.findById(order.id);
   }
 
-  // 关单处理 - 将未出库的库存转为滞留库存或新批次
-  private async handleCloseOrder(
-    productId: string,
-    customerId: string,
-    outboundOrderId: string,
-    outboundNo: string
-  ) {
-    // 获取产品当前库存
-    const [productRecord] = await this.db
-      .select({ stock: productTable.stock, name: productTable.name })
-      .from(productTable)
-      .where(eq(productTable.id, productId));
+  private async resolveBatchSelections(tx: any, detail: OutboundDetailWithBatch) {
+    type Selection = { batchId: string; batchNo: string; quantity: number; weight: number };
+    let requested: Selection[] = [];
 
-    if (productRecord && productRecord.stock > 0) {
-      const closeTime = new Date().toISOString();
-      // 修复：使用UUID后缀确保批次号唯一性，避免毫秒级重复
-      const uuidSuffix = randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase();
-      const batchNo = `CLOSED-${outboundNo}-${uuidSuffix}`;
-      
-      await this.db.insert(productBatchTable).values({
-        batchNo,
-        productId,
-        // 注意：inboundOrderId字段在此处被用于存储出库单ID，表示该批次由关单操作产生
-        // 这是字段复用，业务上通过批次号前缀CLOSED-来识别
-        inboundOrderId: outboundOrderId,
-        quantity: productRecord.stock,
-        weight: 0,
-      });
-
-      // 创建对应的批次库存记录
-      const [newBatch] = await this.db
-        .select({ id: productBatchTable.id })
+    if (detail.batchSelections?.length) {
+      const uniqueIds = new Set(detail.batchSelections.map(item => item.batchId));
+      if (uniqueIds.size !== detail.batchSelections.length) {
+        throw new BadRequestException(`${detail.productName} 存在重复批次`);
+      }
+      requested = detail.batchSelections.map(item => ({
+        batchId: item.batchId,
+        batchNo: item.batchNo,
+        quantity: Number(item.quantity),
+        weight: Number(item.weight || 0),
+      }));
+    } else if (detail.batchNo) {
+      const [batch] = await tx.select({ id: productBatchTable.id, batchNo: productBatchTable.batchNo })
         .from(productBatchTable)
-        .where(eq(productBatchTable.batchNo, batchNo));
+        .where(and(eq(productBatchTable.batchNo, detail.batchNo), eq(productBatchTable.productId, detail.productId)));
+      if (!batch) throw new NotFoundException(`批次 ${detail.batchNo} 不存在或不属于该产品`);
+      requested = [{ batchId: batch.id, batchNo: batch.batchNo, quantity: detail.quantity, weight: detail.weight }];
+    } else {
+      const available = await tx.select({
+        batchId: productBatchTable.id,
+        batchNo: productBatchTable.batchNo,
+        quantityAvailable: productBatchStockTable.quantityAvailable,
+        weightAvailable: productBatchStockTable.weightAvailable,
+      }).from(productBatchTable).innerJoin(
+        productBatchStockTable,
+        eq(productBatchTable.id, productBatchStockTable.batchId),
+      ).where(and(
+        eq(productBatchTable.productId, detail.productId),
+        eq(productBatchStockTable.status, 'active'),
+        sql`${productBatchStockTable.quantityAvailable} > 0`,
+      )).orderBy(asc(productBatchTable.inboundDate), asc(productBatchTable.createdAt));
 
-      if (newBatch) {
-        await this.db.insert(productBatchStockTable).values({
-          batchId: newBatch.id,
-          quantityAvailable: productRecord.stock,
-          weightAvailable: 0,
-          lockedQuantity: 0,
-          lockedWeight: 0,
-          status: 'active',
-        });
-
-        // 记录库存变动，说明这是关单产生的结存
-        await this.db.insert(inventoryRecordTable).values({
-          productId,
-          productName: productRecord.name,
-          changeType: 'closed_balance',
-          quantityChange: 0, // 库存总量不变，只是重新标记批次
-          weightChange: 0,
-          beforeStock: productRecord.stock,
-          afterStock: productRecord.stock,
-          beforeStockWeight: 0,
-          afterStockWeight: 0,
-          referenceNo: outboundNo,
-          operator: 'system',
-          remark: `关单结存：原库存转为滞留批次 ${batchNo}`,
-        });
+      let remainingQuantity = detail.quantity;
+      let remainingWeight = detail.weight;
+      for (const batch of available) {
+        if (remainingQuantity <= 0) break;
+        const quantity = Math.min(remainingQuantity, batch.quantityAvailable);
+        const proportionalWeight = remainingQuantity === quantity
+          ? remainingWeight
+          : detail.weight * quantity / detail.quantity;
+        const weight = Math.min(remainingWeight, batch.weightAvailable, proportionalWeight);
+        requested.push({ batchId: batch.batchId, batchNo: batch.batchNo, quantity, weight });
+        remainingQuantity -= quantity;
+        remainingWeight -= weight;
+      }
+      if (remainingQuantity > 0 || remainingWeight > 0.001) {
+        // 兼容历史导入数据：只有产品总库存、尚未建立批次库存时允许总库存出库。
+        if (available.length === 0) return [];
+        throw new BadRequestException(`${detail.productName} 的批次库存不足`);
       }
     }
+
+    let quantitySum = 0;
+    let weightSum = 0;
+    for (const item of requested) {
+      if (!Number.isInteger(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.weight) || item.weight < 0) {
+        throw new BadRequestException(`${detail.productName} 的批次出库数量或重量无效`);
+      }
+      const [batch] = await tx.select({
+        id: productBatchTable.id,
+        batchNo: productBatchTable.batchNo,
+        productId: productBatchTable.productId,
+        quantityAvailable: productBatchStockTable.quantityAvailable,
+        weightAvailable: productBatchStockTable.weightAvailable,
+        status: productBatchStockTable.status,
+      }).from(productBatchTable).innerJoin(
+        productBatchStockTable,
+        eq(productBatchTable.id, productBatchStockTable.batchId),
+      ).where(eq(productBatchTable.id, item.batchId));
+      if (!batch || batch.productId !== detail.productId || batch.status !== 'active') {
+        throw new BadRequestException(`批次 ${item.batchNo} 不存在、已停用或不属于该产品`);
+      }
+      if (batch.quantityAvailable < item.quantity || batch.weightAvailable + 0.001 < item.weight) {
+        throw new BadRequestException(`批次 ${batch.batchNo} 可用库存不足`);
+      }
+      item.batchNo = batch.batchNo;
+      quantitySum += item.quantity;
+      weightSum += item.weight;
+    }
+    if (quantitySum !== detail.quantity || Math.abs(weightSum - detail.weight) > 0.001) {
+      throw new BadRequestException(`${detail.productName} 的批次合计必须与出库明细一致`);
+    }
+    return requested;
+  }
+
+  private async decreaseStockInTransaction(tx: any, params: {
+    productId: string;
+    quantity: number;
+    weight: number;
+    referenceNo: string;
+    operator: string;
+    remark?: string;
+  }) {
+    const [currentProduct] = await tx.select({
+      name: productTable.name,
+      stock: productTable.stock,
+      stockWeight: productTable.stockWeight,
+      version: productTable.version,
+      deletedAt: productTable.deletedAt,
+    }).from(productTable).where(eq(productTable.id, params.productId));
+    if (!currentProduct || currentProduct.deletedAt) {
+      throw new NotFoundException(`产品不存在或已删除: ${params.productId}`);
+    }
+    if (currentProduct.stock < params.quantity || (currentProduct.stockWeight || 0) + 0.001 < params.weight) {
+      throw new BadRequestException(
+        `${currentProduct.name} 库存不足，当前 ${currentProduct.stock} 件/${currentProduct.stockWeight || 0} 重量`,
+      );
+    }
+    const beforeStock = currentProduct.stock;
+    const beforeStockWeight = currentProduct.stockWeight || 0;
+    const [updated] = await tx.update(productTable).set({
+      stock: beforeStock - params.quantity,
+      stockWeight: beforeStockWeight - params.weight,
+      version: (currentProduct.version || 1) + 1,
+    }).where(and(
+      eq(productTable.id, params.productId),
+      eq(productTable.version, currentProduct.version || 1),
+    )).returning({ id: productTable.id });
+    if (!updated) throw new ConflictException(`${currentProduct.name} 库存已变化，请重试`);
+    await tx.insert(inventoryRecordTable).values({
+      productId: params.productId,
+      productName: currentProduct.name,
+      changeType: 'outbound',
+      quantityChange: -params.quantity,
+      weightChange: -params.weight,
+      beforeStock,
+      afterStock: beforeStock - params.quantity,
+      beforeStockWeight,
+      afterStockWeight: beforeStockWeight - params.weight,
+      referenceNo: params.referenceNo,
+      operator: params.operator,
+      remark: params.remark,
+    });
   }
 
   /**
@@ -604,6 +659,7 @@ export class OutboundService {
         and(
           eq(outboundOrder.customerId, customerId),
           eq(outboundOrder.status, 'pending_reconciliation'),
+          isNull(outboundOrder.reconciliationId),
         ),
       )
       .orderBy(desc(outboundOrder.outboundDate));
@@ -658,30 +714,12 @@ export class OutboundService {
     await this.db.transaction(async (tx) => {
       // 1. 恢复批次库存
       for (const detail of order.details) {
-        if (detail.batchNo) {
-          const batchNos = detail.batchNo.split(',');
-          for (const batchNo of batchNos) {
-            const [batch] = await tx
-              .select({ id: productBatchTable.id })
-              .from(productBatchTable)
-              .where(eq(productBatchTable.batchNo, batchNo.trim()));
-
-            if (batch) {
-              await tx
-                .update(productBatchStockTable)
-                .set({
-                  quantityAvailable: sql`${productBatchStockTable.quantityAvailable} + ${detail.quantity}`,
-                  weightAvailable: sql`${productBatchStockTable.weightAvailable} + ${detail.weight}`,
-                })
-                .where(eq(productBatchStockTable.batchId, batch.id));
-            }
-          }
-        }
+        await this.restoreBatchStocksInTransaction(tx, detail);
       }
 
       // 2. 恢复产品库存
       for (const detail of order.details) {
-        await this.increaseStockWithLock({
+        await this.increaseStockInTransaction(tx, {
           productId: detail.productId,
           quantity: detail.quantity,
           weight: detail.weight || 0,
@@ -703,6 +741,10 @@ export class OutboundService {
       }
 
       // 4. 删除明细
+      for (const detail of order.details) {
+        await tx.delete(outboundBatchDetailTable)
+          .where(eq(outboundBatchDetailTable.outboundDetailId, detail.id));
+      }
       await tx
         .delete(outboundDetail)
         .where(eq(outboundDetail.outboundId, id));
@@ -761,28 +803,7 @@ export class OutboundService {
 
       // 2. 恢复批次库存（在事务内执行）
       for (const detail of order.details) {
-        if (detail.batchNo) {
-          const batchNos = detail.batchNo.split(',');
-          // 按批次号排序，避免死锁
-          const sortedBatchNos = batchNos.map(b => b.trim()).sort();
-
-          for (const batchNo of sortedBatchNos) {
-            const [batch] = await tx
-              .select({ id: productBatchTable.id })
-              .from(productBatchTable)
-              .where(eq(productBatchTable.batchNo, batchNo));
-
-            if (batch) {
-              await tx
-                .update(productBatchStockTable)
-                .set({
-                  quantityAvailable: sql`${productBatchStockTable.quantityAvailable} + ${detail.quantity}`,
-                  weightAvailable: sql`${productBatchStockTable.weightAvailable} + ${detail.weight}`,
-                })
-                .where(eq(productBatchStockTable.batchId, batch.id));
-            }
-          }
-        }
+        await this.restoreBatchStocksInTransaction(tx, detail);
       }
 
       // 3. 恢复产品库存（在事务内执行）
@@ -810,6 +831,41 @@ export class OutboundService {
     });
 
     return { success: true, message: '出库单已撤销' };
+  }
+
+  private async restoreBatchStocksInTransaction(tx: any, detail: any) {
+    const allocations = await tx.select({
+      batchId: outboundBatchDetailTable.batchId,
+      quantity: outboundBatchDetailTable.quantity,
+      weight: outboundBatchDetailTable.weight,
+    }).from(outboundBatchDetailTable)
+      .where(eq(outboundBatchDetailTable.outboundDetailId, detail.id));
+
+    if (allocations.length > 0) {
+      for (const allocation of [...allocations].sort((a, b) => a.batchId.localeCompare(b.batchId))) {
+        await tx.update(productBatchStockTable).set({
+          quantityAvailable: sql`${productBatchStockTable.quantityAvailable} + ${allocation.quantity}`,
+          weightAvailable: sql`${productBatchStockTable.weightAvailable} + ${allocation.weight}`,
+        }).where(eq(productBatchStockTable.batchId, allocation.batchId));
+      }
+      return;
+    }
+
+    // 兼容没有批次分配明细的旧单据；多批次旧数据无法安全推断分配量，拒绝自动倍增库存。
+    const legacyBatchNos = String(detail.batchNo || '').split(',').map((item: string) => item.trim()).filter(Boolean);
+    if (legacyBatchNos.length > 1) {
+      throw new ConflictException('旧出库单缺少批次分配记录，无法安全自动恢复，请由管理员核对库存');
+    }
+    if (legacyBatchNos.length === 1) {
+      const [batch] = await tx.select({ id: productBatchTable.id }).from(productBatchTable)
+        .where(eq(productBatchTable.batchNo, legacyBatchNos[0]));
+      if (batch) {
+        await tx.update(productBatchStockTable).set({
+          quantityAvailable: sql`${productBatchStockTable.quantityAvailable} + ${detail.quantity}`,
+          weightAvailable: sql`${productBatchStockTable.weightAvailable} + ${detail.weight}`,
+        }).where(eq(productBatchStockTable.batchId, batch.id));
+      }
+    }
   }
 
   /**
@@ -1010,6 +1066,7 @@ export class OutboundService {
 
   private async syncToFeishuOutbound(order: any, data: any) {
     if (!this.bitableSyncService) return;
+    const orgCode = getCurrentTenantContext()?.orgCode;
     for (const detail of data.details) {
       await this.bitableSyncService.syncOutbound({
         orderId: order.outboundNo,
@@ -1020,7 +1077,7 @@ export class OutboundService {
         batchNo: detail.batchNo || detail.batchSelections?.map((b: any) => b.batchNo).join(',') || '',
         createdAt: data.outboundDate,
         status: '部分发货',
-      });
+      }, orgCode);
     }
   }
 }

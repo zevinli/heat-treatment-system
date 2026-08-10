@@ -56,8 +56,7 @@ export class OutboundController {
   // 获取出库单操作日志 - 必须放在 :id 路由之前
   @Get(':id/logs')
   async getOperationLogs(@Param('id') id: string) {
-    // 暂时返回空数组，等待服务方法可用
-    return { success: true, data: [] };
+    return this.outboundService.getOperationLogs(id);
   }
 
   // 根据ID获取出库单
@@ -98,6 +97,13 @@ export class OutboundController {
         amount: number;
         batchNo?: string;
         inboundDate?: string;
+        batchSelections?: Array<{
+          batchId: string;
+          batchNo: string;
+          quantity: number;
+          weight: number;
+        }>;
+        closeOrder?: boolean;
       }>;
     },
     @Req() req: Request,
@@ -112,7 +118,7 @@ export class OutboundController {
     return this.outboundService.create({
       ...body,
       outboundDate,
-      creator: body.creator || userId,
+      creator: userId,
       details: body.details.map(d => {
         const inboundDate = d.inboundDate ? new Date(d.inboundDate) : undefined;
         if (d.inboundDate && inboundDate && isNaN(inboundDate.getTime())) {
@@ -133,6 +139,9 @@ export class OutboundController {
     @Param('id') id: string,
     @Body('status') status: string,
   ) {
+    if (!['pending_reconciliation', 'active'].includes(status)) {
+      throw new BadRequestException('不允许的出库状态');
+    }
     return this.outboundService.updateStatus(id, status);
   }
 

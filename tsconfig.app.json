@@ -19,9 +19,10 @@
     "paths": {
       "@/*": ["./client/src/*"],
       "@client/*": ["./client/*"],
-      "@shared/*": ["./shared/*"]
+      "@shared/*": ["./shared/*"],
+      "@lark-apaas/client-toolkit": ["./_shims/@lark-apaas/client-toolkit/index"],
+      "@lark-apaas/client-toolkit/*": ["./_shims/@lark-apaas/client-toolkit/*"]
     }
   },
-  "include": ["client/src"],
-  "references": [{ "path": "./tsconfig.node.json" }]
+  "include": ["client/src", "_shims/@lark-apaas/client-toolkit"]
 }

@@ -1,6 +1,6 @@
-import { Controller, Get, Post, Body, Query, Req, Logger } from '@nestjs/common';
+import { Controller, Get, Post, Put, Body, Query, Param, Req, Logger } from '@nestjs/common';
 import type { InventoryChangeType } from '@shared/api.interface';
-import { NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
+import { CanRole, NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
 import type { Request } from 'express';
 import { InventoryService } from './inventory.service';
 import { PAGINATION } from '../../config/constants';
@@ -53,6 +53,7 @@ export class InventoryController {
 
   // 手动调整库存（管理员直接调整，需要审批流程请参考审批API）
   @NeedLogin()
+  @CanRole('inventory:adjust')
   @Post('adjust')
   async adjustStock(
     @Body()
@@ -69,12 +70,52 @@ export class InventoryController {
     return this.inventoryService.adjustStockDirect({
       ...body,
       operator: userId,
-      isAdmin: true,
+      isAdmin: req.userContext.userRole === 'admin',
+    });
+  }
+
+  @NeedLogin()
+  @CanRole('inventory:request-adjust')
+  @Post('adjustment-requests')
+  requestAdjustment(
+    @Body() body: {
+      productId: string;
+      quantityChange: number;
+      weightChange?: number;
+      reason: 'inventory_profit' | 'inventory_loss' | 'damage' | 'quality_reject' | 'other';
+      remark?: string;
+    },
+    @Req() req: Request,
+  ) {
+    return this.inventoryService.requestStockAdjust({ ...body, operator: req.userContext.userId });
+  }
+
+  @NeedLogin()
+  @CanRole('inventory:approve')
+  @Get('adjustment-requests')
+  listAdjustmentRequests(@Query('status') status?: string) {
+    return this.inventoryService.listStockAdjustRequests(status);
+  }
+
+  @NeedLogin()
+  @CanRole('inventory:approve')
+  @Put('adjustment-requests/:id')
+  approveAdjustment(
+    @Param('id') id: string,
+    @Body() body: { approved: boolean; rejectReason?: string },
+    @Req() req: Request,
+  ) {
+    return this.inventoryService.approveStockAdjust({
+      requestId: id,
+      approver: req.userContext.userId,
+      approved: body.approved,
+      rejectReason: body.rejectReason,
     });
   }
 
   // 增加库存（入库专用）
   @NeedLogin()
+  @CanRole('inbound:create')
   @Post('increase')
   async increaseStock(
     @Body()
@@ -96,6 +137,7 @@ export class InventoryController {
 
   // 减少库存（出库专用）
   @NeedLogin()
+  @CanRole('outbound:create')
   @Post('decrease')
   async decreaseStock(
     @Body()

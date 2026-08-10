@@ -542,33 +542,82 @@ const StatisticsPage: React.FC = () => {
       outboundQuantity: number;
       outboundWeight: number;
       revenue: number;
+      processingCycleDays: number;
+      processingCycleCount: number;
+      avgProcessingCycleDays: number;
     }>();
-    
-    // 简化处理：从出库单统计产品销量（实际应从出库明细获取）
-    filteredOutboundOrders.forEach(() => {
-      // 占位，后续可扩展从出库明细统计
-    });
-    
-    // 基于现有产品数据
+
+    // 先建立产品主数据，再严格按筛选范围内的出库明细汇总运行数据。
     products.forEach(p => {
       productMap.set(p.id, {
         id: p.id,
         name: p.name,
         material: p.material || '未分类',
         process: p.process || '未分类',
-        outboundCount: p.inboundQuantity || 0,
-        outboundQuantity: p.inboundQuantity || 0,
-        outboundWeight: p.inboundWeight || 0,
-        revenue: (p.inboundQuantity || 0) * (p.unitPrice || 0),
+        outboundCount: 0,
+        outboundQuantity: 0,
+        outboundWeight: 0,
+        revenue: 0,
+        processingCycleDays: 0,
+        processingCycleCount: 0,
+        avgProcessingCycleDays: 0,
       });
     });
+
+    filteredOutboundOrders
+      .filter(order => order.status !== 'cancelled')
+      .forEach(order => {
+        const countedProducts = new Set<string>();
+        (order.details || []).forEach(detail => {
+          const product = products.find(item => item.id === detail.productId);
+          const current = productMap.get(detail.productId) || {
+            id: detail.productId,
+            name: detail.productName || '未知产品',
+            material: detail.material || '未分类',
+            process: detail.process || '未分类',
+            outboundCount: 0,
+            outboundQuantity: 0,
+            outboundWeight: 0,
+            revenue: 0,
+            processingCycleDays: 0,
+            processingCycleCount: 0,
+            avgProcessingCycleDays: 0,
+          };
+          if (!countedProducts.has(detail.productId)) {
+            current.outboundCount += 1;
+            countedProducts.add(detail.productId);
+          }
+          current.outboundQuantity += Number(detail.quantity || 0);
+          current.outboundWeight += Number(detail.weight || 0);
+          current.revenue += Number(detail.amount || 0);
+
+          if (detail.inboundDate) {
+            const inboundAt = new Date(detail.inboundDate).getTime();
+            const outboundAt = new Date(order.outboundDate).getTime();
+            if (Number.isFinite(inboundAt) && Number.isFinite(outboundAt) && outboundAt >= inboundAt) {
+              current.processingCycleDays += (outboundAt - inboundAt) / 86_400_000;
+              current.processingCycleCount += 1;
+            }
+          }
+          current.name = product?.name || current.name;
+          current.material = product?.material || current.material;
+          current.process = product?.process || current.process;
+          productMap.set(detail.productId, current);
+        });
+      });
     
     const productList = Array.from(productMap.values())
+      .map(product => ({
+        ...product,
+        avgProcessingCycleDays: product.processingCycleCount > 0
+          ? product.processingCycleDays / product.processingCycleCount
+          : 0,
+      }))
       .sort((a, b) => b.revenue - a.revenue);
     
     // 材质分布
     const materialMap = new Map<string, number>();
-    productList.forEach(p => {
+    productList.filter(p => p.outboundQuantity > 0).forEach(p => {
       const material = p.material || '未分类';
       materialMap.set(material, (materialMap.get(material) || 0) + p.outboundQuantity);
     });
@@ -579,7 +628,7 @@ const StatisticsPage: React.FC = () => {
     
     // 工艺分布
     const processMap = new Map<string, number>();
-    productList.forEach(p => {
+    productList.filter(p => p.revenue > 0).forEach(p => {
       const process = p.process || '未分类';
       processMap.set(process, (processMap.get(process) || 0) + p.revenue);
     });
@@ -966,6 +1015,45 @@ ${selectedCustomers.length > 0 ? `【筛选客户】${selectedCustomers.length}�
       },
     ],
   }), [productStats.materialDistribution]);
+
+  // 产品运行热力图：颜色深浅表示筛选周期内的实际出库次数。
+  const productHeatmapOption = useMemo(() => {
+    const runningProducts = productStats.productList
+      .filter(product => product.outboundCount > 0)
+      .slice(0, 12);
+    const maxHeat = Math.max(1, ...runningProducts.map(product => product.outboundCount));
+    return {
+      tooltip: { position: 'top' },
+      grid: { left: 80, right: 24, top: 20, bottom: 80 },
+      xAxis: {
+        type: 'category',
+        data: runningProducts.map(product => product.name),
+        splitArea: { show: true },
+        axisLabel: { interval: 0, rotate: 35, width: 90, overflow: 'truncate' },
+      },
+      yAxis: {
+        type: 'category',
+        data: ['出库热度'],
+        splitArea: { show: true },
+      },
+      visualMap: {
+        min: 0,
+        max: maxHeat,
+        calculable: true,
+        orient: 'horizontal',
+        left: 'center',
+        bottom: 0,
+        inRange: { color: ['hsl(215 70% 95%)', 'hsl(215 70% 35%)'] },
+      },
+      series: [{
+        name: '出库次数',
+        type: 'heatmap',
+        data: runningProducts.map((product, index) => [index, 0, product.outboundCount]),
+        label: { show: true },
+        emphasis: { itemStyle: { shadowBlur: 8, shadowColor: 'hsl(215 70% 35% / 35%)' } },
+      }],
+    };
+  }, [productStats.productList]);
 
   // 库存状态分布
   const inventoryStatusOption = useMemo(() => ({
@@ -1406,6 +1494,56 @@ ${selectedCustomers.length > 0 ? `【筛选客户】${selectedCustomers.length}�
             ) : (
               <div className="h-[300px] flex items-center justify-center text-muted-foreground">
                 暂无数据
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* 产品运行统计 */}
+        <Card className="lg:col-span-2">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">产品运行热力图与加工周期</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {productStats.productList.some(product => product.outboundCount > 0) ? (
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                <ReactECharts option={productHeatmapOption} style={{ height: 300 }} />
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>产品</TableHead>
+                        <TableHead className="text-right">出库次数</TableHead>
+                        <TableHead className="text-right">出库数量</TableHead>
+                        <TableHead className="text-right">平均周期</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {productStats.productList
+                        .filter(product => product.outboundCount > 0)
+                        .slice(0, 10)
+                        .map(product => (
+                          <TableRow key={product.id}>
+                            <TableCell>
+                              <div className="font-medium">{product.name}</div>
+                              <div className="text-xs text-muted-foreground">{product.material} · {product.process}</div>
+                            </TableCell>
+                            <TableCell className="text-right">{product.outboundCount}</TableCell>
+                            <TableCell className="text-right">{product.outboundQuantity.toLocaleString()}</TableCell>
+                            <TableCell className="text-right">
+                              {product.processingCycleCount > 0
+                                ? `${product.avgProcessingCycleDays.toFixed(1)}天`
+                                : '暂无入库日期'}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+            ) : (
+              <div className="h-[240px] flex items-center justify-center text-muted-foreground">
+                当前筛选范围内暂无产品出库明细
               </div>
             )}
           </CardContent>

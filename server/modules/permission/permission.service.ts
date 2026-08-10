@@ -1,9 +1,10 @@
 import { Injectable, Inject, ForbiddenException } from '@nestjs/common';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, sql, desc, isNull, ne } from 'drizzle-orm';
 import {
   DRIZZLE_DATABASE,
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
+import { TENANT_DATABASE } from '../../common/tenant-database.provider';
 import {
   rolePermissionTable,
   customerTable,
@@ -23,6 +24,8 @@ import {
   qualityInspectionTable,
   approvalRequestTable,
   outboundBatchDetailTable,
+  appUserTable,
+  authSessionTable,
 } from '../../database/schema';
 
 export type PermissionCode =
@@ -30,7 +33,7 @@ export type PermissionCode =
   | 'product:view' | 'product:create' | 'product:update' | 'product:delete'
   | 'inbound:view' | 'inbound:create' | 'inbound:undo'
   | 'outbound:view' | 'outbound:create' | 'outbound:delete' | 'outbound:undo'
-  | 'inventory:view' | 'inventory:adjust'
+  | 'inventory:view' | 'inventory:adjust' | 'inventory:request-adjust' | 'inventory:approve'
   | 'reconciliation:view' | 'reconciliation:create' | 'reconciliation:audit' | 'reconciliation:unaudit'
   | 'statistics:view'
   | 'system:settings' | 'system:permission';
@@ -41,7 +44,7 @@ export const ROLE_PERMISSIONS: Record<string, PermissionCode[]> = {
     'product:view', 'product:create', 'product:update', 'product:delete',
     'inbound:view', 'inbound:create', 'inbound:undo',
     'outbound:view', 'outbound:create', 'outbound:delete', 'outbound:undo',
-    'inventory:view', 'inventory:adjust',
+    'inventory:view', 'inventory:adjust', 'inventory:request-adjust', 'inventory:approve',
     'reconciliation:view', 'reconciliation:create', 'reconciliation:audit', 'reconciliation:unaudit',
     'statistics:view',
     'system:settings', 'system:permission',
@@ -51,7 +54,7 @@ export const ROLE_PERMISSIONS: Record<string, PermissionCode[]> = {
     'product:view', 'product:create', 'product:update',
     'inbound:view', 'inbound:create', 'inbound:undo',
     'outbound:view', 'outbound:create', 'outbound:undo',
-    'inventory:view',
+    'inventory:view', 'inventory:request-adjust',
     'reconciliation:view',
     'statistics:view',
   ],
@@ -78,7 +81,8 @@ export const ROLE_PERMISSIONS: Record<string, PermissionCode[]> = {
 @Injectable()
 export class PermissionService {
   constructor(
-    @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
+    @Inject(DRIZZLE_DATABASE) private readonly masterDb: PostgresJsDatabase,
   ) {}
 
   /**
@@ -116,6 +120,15 @@ export class PermissionService {
    * 获取用户角色列表（从数据库）
    */
   async getUserRoles(userId: string): Promise<string[]> {
+    // 登录账号的角色存储在主库，是鉴权的唯一权威来源。
+    const [account] = await this.masterDb
+      .select({ role: appUserTable.role })
+      .from(appUserTable)
+      .where(eq(appUserTable.id, userId))
+      .limit(1);
+    if (account?.role) return [account.role];
+
+    // 兼容早期仅写入租户 role_permission 的数据。
     const roles = await this.db
       .select({ roleName: rolePermissionTable.roleName })
       .from(rolePermissionTable)
@@ -135,7 +148,40 @@ export class PermissionService {
   /**
    * 为用户分配角色
    */
-  async assignRole(userId: string, roleName: string) {
+  async assignRole(userId: string, roleName: string, actorId: string) {
+    if (!Object.prototype.hasOwnProperty.call(ROLE_PERMISSIONS, roleName)) {
+      throw new ForbiddenException('无效角色');
+    }
+
+    const [existing] = await this.masterDb
+      .select({ id: appUserTable.id, role: appUserTable.role })
+      .from(appUserTable)
+      .where(eq(appUserTable.id, userId))
+      .limit(1);
+    if (!existing) throw new ForbiddenException('用户不存在');
+    if (userId === actorId && existing.role !== roleName) {
+      throw new ForbiddenException('不能修改自己的角色');
+    }
+    if (existing.role === 'admin' && roleName !== 'admin') {
+      const [{ count }] = await this.masterDb
+        .select({ count: sql<number>`count(*)::int` })
+        .from(appUserTable)
+        .where(and(eq(appUserTable.role, 'admin'), eq(appUserTable.status, 'active'), ne(appUserTable.id, userId)));
+      if (count === 0) throw new ForbiddenException('系统必须保留至少一个启用的管理员');
+    }
+
+    await this.masterDb
+      .update(appUserTable)
+      .set({ role: roleName, updatedAt: new Date() })
+      .where(eq(appUserTable.id, userId))
+      .returning({ id: appUserTable.id });
+
+    // 角色变更后立即撤销旧会话，防止旧令牌继续保留原权限。
+    await this.masterDb
+      .update(authSessionTable)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(authSessionTable.userId, userId), isNull(authSessionTable.revokedAt)));
+
     // 先删除该用户的现有角色关联
     await this.db
       .delete(rolePermissionTable)
@@ -169,21 +215,21 @@ export class PermissionService {
     return ROLE_PERMISSIONS[roleName] || [];
   }
 
+  async getOperationLogs(limit = 500) {
+    return this.db.select().from(operationLogTable)
+      .orderBy(desc(operationLogTable.createdAt))
+      .limit(Math.min(Math.max(limit, 1), 1000));
+  }
+
   /**
    * 清空数据库 - 恢复初始化设置
    * 危险操作，仅管理员可执行
    */
   async resetDatabase(userId: string) {
     // 检查用户是否有管理员权限
-    // 如果 rolePermissionTable 为空（系统刚初始化），允许任何已登录用户执行
-    const allPermissions = await this.db.select().from(rolePermissionTable).limit(1);
-    const skipPermissionCheck = allPermissions.length === 0;
-    
-    if (!skipPermissionCheck) {
-      const isAdmin = await this.hasPermission(userId, 'system:permission');
-      if (!isAdmin) {
-        throw new ForbiddenException('无权执行此操作，需要管理员权限');
-      }
+    const isAdmin = await this.hasPermission(userId, 'system:permission');
+    if (!isAdmin) {
+      throw new ForbiddenException('无权执行此操作，需要管理员权限');
     }
 
     // 按依赖顺序清空数据表（先删子表，再删父表）

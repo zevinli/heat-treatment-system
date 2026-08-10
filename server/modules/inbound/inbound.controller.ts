@@ -56,8 +56,7 @@ export class InboundController {
   // 获取入库单操作日志 - 必须放在 :id 路由之前
   @Get(':id/logs')
   async getOperationLogs(@Param('id') id: string) {
-    // 暂时返回空数组，等待服务方法可用
-    return { success: true, data: [] };
+    return this.inboundService.getOperationLogs(id);
   }
 
   // 根据ID获取入库单
@@ -101,6 +100,7 @@ export class InboundController {
         material?: string;
         techRequirement?: string;
         urgent?: boolean;
+        attachments?: string[];
       }>;
     },
     @Req() req: Request,

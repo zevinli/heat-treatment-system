@@ -731,7 +731,7 @@ export type PermissionCode =
   | 'product:view' | 'product:create' | 'product:update' | 'product:delete'
   | 'inbound:view' | 'inbound:create' | 'inbound:undo'
   | 'outbound:view' | 'outbound:create' | 'outbound:delete' | 'outbound:undo'
-  | 'inventory:view' | 'inventory:adjust'
+  | 'inventory:view' | 'inventory:adjust' | 'inventory:request-adjust' | 'inventory:approve'
   | 'reconciliation:view' | 'reconciliation:create' | 'reconciliation:audit' | 'reconciliation:unaudit'
   | 'statistics:view'
   | 'system:settings' | 'system:permission';

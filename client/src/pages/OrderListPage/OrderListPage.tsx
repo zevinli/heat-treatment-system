@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/dialog';
 import { toast } from 'sonner';
 import { Table } from '@lark-apaas/client-toolkit/antd-table';
-import type { ColumnsType } from 'antd/es/table';
+import type { ColumnType } from '@lark-apaas/client-toolkit/antd-table';
 import {
   RotateCcw,
   Eye,
@@ -235,7 +235,7 @@ const OrderListPage: React.FC = () => {
   };
 
   // 入库单表格列
-  const inboundColumns: ColumnsType<IInboundOrder> = [
+  const inboundColumns: ColumnType<IInboundOrder>[] = [
     {
       title: '入库单号',
       dataIndex: 'inboundNo',
@@ -351,7 +351,7 @@ const OrderListPage: React.FC = () => {
   ];
 
   // 出库单表格列
-  const outboundColumns: ColumnsType<IOutboundOrder> = [
+  const outboundColumns: ColumnType<IOutboundOrder>[] = [
     {
       title: '出库单号',
       dataIndex: 'outboundNo',

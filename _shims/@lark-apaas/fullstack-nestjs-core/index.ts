@@ -16,9 +16,11 @@ export const DRIZZLE_DATABASE = 'DRIZZLE_DATABASE';
 // ===== PostgresJsDatabase type stub =====
 export type PostgresJsDatabase<T = any> = any;
 
-// ===== NeedLogin decorator =====
+// ===== Authentication decorators =====
 export const IS_PUBLIC_KEY = 'isPublic';
-export const NeedLogin = () => SetMetadata(IS_PUBLIC_KEY, true);
+export const AUTH_REQUIRED_KEY = 'authRequired';
+export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
+export const NeedLogin = () => SetMetadata(AUTH_REQUIRED_KEY, true);
 
 // ===== CanRole decorator =====
 export const CanRole = (...roles: string[]) => SetMetadata('roles', roles);
@@ -66,7 +68,7 @@ function createDb() {
     console.log('[DB] Using PGlite (local dev)');
     const { PGlite } = require('@electric-sql/pglite');
     const { drizzle } = require('drizzle-orm/pglite');
-    const pgClient = new PGlite(join(process.cwd(), 'data'));
+    const pgClient = new PGlite(process.env.PGLITE_DATA_DIR || join(process.cwd(), 'data'));
     return drizzle(pgClient);
   } catch (err: any) {
     console.error('[DB] PGlite init failed:', err.message);

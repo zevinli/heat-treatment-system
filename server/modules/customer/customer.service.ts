@@ -1,10 +1,19 @@
 import { Injectable, Inject, Logger, BadRequestException } from '@nestjs/common';
-import { eq, like, or, and, sql, isNull } from 'drizzle-orm';
+import { eq, like, or, and, sql, isNull, desc, inArray } from 'drizzle-orm';
 import {
-  DRIZZLE_DATABASE,
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
-import { customer, productTable, outboundOrderTable, reconciliationTable } from '../../database/schema';
+import { TENANT_DATABASE } from '../../common/tenant-database.provider';
+import {
+  customer,
+  productTable,
+  inboundOrderTable,
+  inboundDetailTable,
+  outboundOrderTable,
+  outboundDetailTable,
+  reconciliationTable,
+  reconciliationDetailTable,
+} from '../../database/schema';
 import { PAGINATION } from '../../config/constants';
 
 @Injectable()
@@ -12,7 +21,7 @@ export class CustomerService {
   private readonly logger = new Logger(CustomerService.name);
 
   constructor(
-    @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
   ) {}
 
   // 获取所有客户（排除已删除）
@@ -252,6 +261,79 @@ export class CustomerService {
       }
     }
 
+    const [inboundRows, outboundRows, reconciliationRows] = await Promise.all([
+      this.db
+        .select({
+          id: inboundDetailTable.id,
+          date: inboundOrderTable.inboundDate,
+          orderNo: inboundOrderTable.inboundNo,
+          productName: inboundDetailTable.productName,
+          quantity: inboundDetailTable.quantity,
+          amount: inboundDetailTable.amount,
+          status: inboundOrderTable.status,
+        })
+        .from(inboundOrderTable)
+        .innerJoin(inboundDetailTable, eq(inboundDetailTable.inboundId, inboundOrderTable.id))
+        .where(eq(inboundOrderTable.customerId, id))
+        .orderBy(desc(inboundOrderTable.inboundDate))
+        .limit(500),
+      this.db
+        .select({
+          id: outboundDetailTable.id,
+          date: outboundOrderTable.outboundDate,
+          orderNo: outboundOrderTable.outboundNo,
+          productName: outboundDetailTable.productName,
+          quantity: outboundDetailTable.quantity,
+          amount: outboundDetailTable.amount,
+          status: outboundOrderTable.status,
+        })
+        .from(outboundOrderTable)
+        .innerJoin(outboundDetailTable, eq(outboundDetailTable.outboundId, outboundOrderTable.id))
+        .where(eq(outboundOrderTable.customerId, id))
+        .orderBy(desc(outboundOrderTable.outboundDate))
+        .limit(500),
+      this.db
+        .select({
+          id: reconciliationDetailTable.id,
+          date: reconciliationTable.createdAt,
+          orderNo: reconciliationTable.reconciliationNo,
+          productName: reconciliationDetailTable.productName,
+          quantity: reconciliationDetailTable.quantity,
+          amount: reconciliationDetailTable.amount,
+          status: reconciliationTable.status,
+        })
+        .from(reconciliationTable)
+        .innerJoin(
+          reconciliationDetailTable,
+          and(
+            eq(reconciliationDetailTable.reconciliationId, reconciliationTable.id),
+            eq(reconciliationDetailTable.isActive, true),
+          ),
+        )
+        .where(eq(reconciliationTable.customerId, id))
+        .orderBy(desc(reconciliationTable.createdAt))
+        .limit(500),
+    ]);
+
+    const normalizeStatus = (value: string | null, pendingStatuses: string[] = []) =>
+      value === 'cancelled' ? 'cancelled' : pendingStatuses.includes(value || '') ? 'pending' : 'completed';
+    const transactions = [
+      ...inboundRows.map((row: any) => ({ ...row, type: 'inbound', status: normalizeStatus(row.status) })),
+      ...outboundRows.map((row: any) => ({ ...row, type: 'outbound', status: normalizeStatus(row.status) })),
+      ...reconciliationRows.map((row: any) => ({
+        ...row,
+        type: 'reconciliation',
+        status: normalizeStatus(row.status, ['draft', 'confirmed']),
+      })),
+    ]
+      .map((row: any) => ({
+        ...row,
+        date: new Date(row.date).toISOString().slice(0, 10),
+        quantity: Number(row.quantity || 0),
+        amount: Number(row.amount || 0),
+      }))
+      .sort((a: any, b: any) => b.date.localeCompare(a.date));
+
     return {
       customerId: id,
       customerName: customerData.name,
@@ -259,6 +341,7 @@ export class CustomerService {
       monthlyInboundCount,
       lastInboundDate,
       status,
+      transactions,
     };
   }
 
@@ -269,14 +352,13 @@ export class CustomerService {
       return { canDeactivate: false, reason: '客户不存在' };
     }
 
-    // 检查待发货出库单 - 添加 status = 'active' 过滤
+    // 待对账出库单尚未完成财务闭环，禁止停用客户。
     const pendingOutbound = await this.db
       .select({ count: sql<number>`count(*)` })
       .from(outboundOrderTable)
       .where(and(
         eq(outboundOrderTable.customerId, id),
         eq(outboundOrderTable.status, 'pending_reconciliation'),
-        eq(outboundOrderTable.status, 'active'),
       ));
     const pendingOutboundCount = pendingOutbound[0]?.count || 0;
 
@@ -299,7 +381,7 @@ export class CustomerService {
       .from(reconciliationTable)
       .where(and(
         eq(reconciliationTable.customerId, id),
-        eq(reconciliationTable.status, 'audited'),
+        inArray(reconciliationTable.status, ['audited', 'invoiced', 'partial_paid']),
       ));
     const totalFinalAmount = (unreceivedResult[0]?.totalFinalAmount || 0) / 100;
     const totalReceiptAmount = (unreceivedResult[0]?.totalReceiptAmount || 0) / 100;

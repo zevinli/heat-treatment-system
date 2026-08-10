@@ -1,9 +1,9 @@
 import { Injectable, Inject, Logger, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { eq, and, sql, desc, inArray } from 'drizzle-orm';
 import {
-  DRIZZLE_DATABASE,
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
+import { TENANT_DATABASE } from '../../common/tenant-database.provider';
 import { 
   productTable, 
   inventoryRecordTable,
@@ -29,7 +29,7 @@ export class InventoryService {
   private readonly logger = new Logger(InventoryService.name);
 
   constructor(
-    @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
   ) {}
 
   /**
@@ -286,10 +286,14 @@ export class InventoryService {
     remark?: string;
   }): Promise<{ requestId: string; message: string }> {
     const { productId, quantityChange, operator, reason, remark } = params;
+    const weightChange = Number(params.weightChange || 0);
+    if (!Number.isInteger(quantityChange) || !Number.isFinite(weightChange) || (quantityChange === 0 && weightChange === 0)) {
+      throw new BadRequestException('库存调整数量必须为整数，且数量或重量至少有一项不为0');
+    }
 
     // 检查产品是否存在
     const [product] = await this.db
-      .select({ id: productTable.id, name: productTable.name, stock: productTable.stock })
+      .select({ id: productTable.id, name: productTable.name, stock: productTable.stock, stockWeight: productTable.stockWeight })
       .from(productTable)
       .where(eq(productTable.id, productId));
 
@@ -303,6 +307,9 @@ export class InventoryService {
         `调整后库存将为负数，当前库存 ${product.stock}，调整量 ${quantityChange}`
       );
     }
+    if ((product.stockWeight || 0) + weightChange < 0) {
+      throw new BadRequestException('调整后库存重量不能为负数');
+    }
 
     // 创建审批请求
     const [request] = await this.db.insert(approvalRequestTable).values({
@@ -312,6 +319,7 @@ export class InventoryService {
       requester: operator,
       status: 'pending',
       reason: `[${reason}] ${remark || '库存调整申请'}`,
+      payload: { productId, quantityChange, weightChange, reason, remark: remark || '' },
     }).returning();
 
     this.logger.log(`库存调整申请已创建: ${request.id}, 产品: ${product.name}, 调整量: ${quantityChange}`);
@@ -349,32 +357,31 @@ export class InventoryService {
     if (request.type !== 'stock_adjust') {
       throw new BadRequestException('审批类型不匹配');
     }
+    if (request.requester === approver) {
+      throw new ForbiddenException('申请人不能审批自己的库存调整申请');
+    }
 
     if (approved) {
-      // 解析调整原因
-      const reasonMatch = request.reason.match(/^\[([^\]]+)\]\s*(.*)$/);
-      const reason = reasonMatch ? reasonMatch[1] : 'other';
-      const remark = reasonMatch ? reasonMatch[2] : request.reason;
-
-      // 执行库存调整
-      await this.executeStockAdjust({
-        productId: request.entityId,
-        // 从reason中解析调整量是个问题，需要在申请时存储更多信息
-        // 这里简化处理，实际应该在approvalRequest中添加更多字段
-        operator: request.requester,
-        reason: reason as any,
-        remark: remark,
+      const payload = request.payload as null | {
+        productId: string;
+        quantityChange: number;
+        weightChange: number;
+        reason: string;
+        remark?: string;
+      };
+      if (!payload || payload.productId !== request.entityId) {
+        throw new BadRequestException('旧审批申请缺少调整数据，不能自动执行，请重新提交');
+      }
+      await this.db.transaction(async tx => {
+        const [claimed] = await tx.update(approvalRequestTable).set({ status: 'processing' })
+          .where(and(eq(approvalRequestTable.id, requestId), eq(approvalRequestTable.status, 'pending')))
+          .returning({ id: approvalRequestTable.id });
+        if (!claimed) throw new ConflictException('该审批请求已由其他人处理');
+        await this.executeStockAdjust(tx, { ...payload, operator: approver });
+        await tx.update(approvalRequestTable).set({
+          status: 'approved', approver, approvedAt: new Date(),
+        }).where(eq(approvalRequestTable.id, requestId));
       });
-
-      // 更新审批状态
-      await this.db
-        .update(approvalRequestTable)
-        .set({
-          status: 'approved',
-          approver: approver,
-          approvedAt: new Date(),
-        })
-        .where(eq(approvalRequestTable.id, requestId));
 
       this.logger.log(`库存调整申请已批准: ${requestId}`);
     } else {
@@ -387,7 +394,7 @@ export class InventoryService {
           rejectedAt: new Date(),
           rejectReason: rejectReason || '审批拒绝',
         })
-        .where(eq(approvalRequestTable.id, requestId));
+        .where(and(eq(approvalRequestTable.id, requestId), eq(approvalRequestTable.status, 'pending')));
 
       this.logger.log(`库存调整申请已拒绝: ${requestId}, 原因: ${rejectReason}`);
     }
@@ -397,15 +404,57 @@ export class InventoryService {
    * 执行库存调整 - 内部方法
    * 修复：使用完整的changeType枚举
    */
-  private async executeStockAdjust(params: {
+  private async executeStockAdjust(tx: any, params: {
     productId: string;
     operator: string;
+    quantityChange: number;
+    weightChange: number;
     reason: string;
     remark?: string;
   }): Promise<void> {
-    // 这里简化处理，实际应该存储完整的调整参数
-    // 实际场景中需要从审批请求中恢复完整的调整参数
-    this.logger.log(`执行库存调整: ${params.productId}`);
+    const [current] = await tx.select().from(productTable).where(eq(productTable.id, params.productId));
+    if (!current) throw new BadRequestException('产品不存在');
+    const afterStock = current.stock + params.quantityChange;
+    const afterWeight = (current.stockWeight || 0) + params.weightChange;
+    if (afterStock < 0 || afterWeight < 0) throw new BadRequestException('审批时库存已变化，调整后不能为负数');
+    const [updated] = await tx.update(productTable).set({
+      stock: afterStock,
+      stockWeight: afterWeight,
+      version: (current.version || 1) + 1,
+    }).where(and(eq(productTable.id, params.productId), eq(productTable.version, current.version || 1)))
+      .returning({ id: productTable.id });
+    if (!updated) throw new ConflictException('库存已变化，请重新审批');
+    const changeType: InventoryChangeType = params.quantityChange > 0
+      ? params.reason === 'inventory_profit' ? 'inventory_profit' : 'adjustment_increase'
+      : params.reason === 'inventory_loss' ? 'inventory_loss'
+        : params.reason === 'damage' ? 'damage'
+          : params.reason === 'quality_reject' ? 'quality_reject' : 'adjustment_decrease';
+    await tx.insert(inventoryRecordTable).values({
+      productId: current.id,
+      productName: current.name,
+      material: current.material,
+      process: current.process,
+      workpieceNo: current.workpieceNo,
+      unit: current.unit,
+      changeType,
+      quantityChange: params.quantityChange,
+      weightChange: params.weightChange,
+      beforeStock: current.stock,
+      afterStock,
+      beforeStockWeight: current.stockWeight || 0,
+      afterStockWeight: afterWeight,
+      referenceNo: `ADJ-${Date.now()}`,
+      customerCode: current.customerCode,
+      customerName: current.customerName,
+      operator: params.operator,
+      remark: `[${params.reason}] ${params.remark || '审批库存调整'}`,
+    });
+  }
+
+  async listStockAdjustRequests(status?: string) {
+    const condition = status ? and(eq(approvalRequestTable.type, 'stock_adjust'), eq(approvalRequestTable.status, status))
+      : eq(approvalRequestTable.type, 'stock_adjust');
+    return this.db.select().from(approvalRequestTable).where(condition).orderBy(desc(approvalRequestTable.requestedAt));
   }
 
   /**

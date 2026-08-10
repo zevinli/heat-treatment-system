@@ -3,9 +3,9 @@ import { BitableSyncService } from '../feishu/bitable-sync.service';
 import { eq, and, desc, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import {
-  DRIZZLE_DATABASE,
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
+import { TENANT_DATABASE } from '../../common/tenant-database.provider';
 import {
   inboundOrder,
   inboundDetail,
@@ -24,13 +24,14 @@ import {
 import { yuanToCents } from '../../common/utils/currency';
 import { checkUndoable } from '../../common/utils/undo-check.util';
 import { PAGINATION } from '../../config/constants';
+import { getCurrentTenantContext } from '../../common/tenant-context.storage';
 
 @Injectable()
 export class InboundService {
   private readonly logger = new Logger(InboundService.name);
 
   constructor(
-    @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
     private readonly bitableSyncService?: BitableSyncService,
   ) {}
 
@@ -185,19 +186,28 @@ export class InboundService {
       techRequirement?: string;
       urgent?: boolean;
       batchNo?: string;
+      attachments?: string[];
     }>;
   }) {
-    // 自动从 details 计算总计（当前端未传或为 0/NaN 时）
-    const totalAmount = data.totalAmount && !isNaN(data.totalAmount) && data.totalAmount > 0
-      ? data.totalAmount
-      : data.details.reduce((sum, d) => sum + ((d.unitPrice || 0) * (d.quantity || 0)), 0);
-    const totalQuantity = data.totalQuantity && !isNaN(data.totalQuantity) && data.totalQuantity > 0
-      ? data.totalQuantity
-      : data.details.reduce((sum, d) => sum + (d.quantity || 0), 0);
-    const totalWeight = data.totalWeight && !isNaN(data.totalWeight) && data.totalWeight > 0
-      ? data.totalWeight
-      : data.details.reduce((sum, d) => sum + (d.weight || 0), 0);
-
+    if (!Array.isArray(data.details) || data.details.length === 0) throw new BadRequestException('入库明细不能为空');
+    let details = data.details.map((detail, index) => {
+      const quantity = Number(detail.quantity);
+      const weight = Number(detail.weight || 0);
+      const unitPrice = Number(detail.unitPrice || 0);
+      const amount = Number(detail.amount || 0);
+      if (!Number.isInteger(quantity) || quantity <= 0) throw new BadRequestException(`第 ${index + 1} 行数量必须为正整数`);
+      if (!Number.isFinite(weight) || weight < 0 || (detail.unit === 'kg' && weight <= 0)) {
+        throw new BadRequestException(`第 ${index + 1} 行重量无效`);
+      }
+      if (!Number.isFinite(unitPrice) || unitPrice < 0 || !Number.isFinite(amount) || amount < 0) {
+        throw new BadRequestException(`第 ${index + 1} 行金额或单价无效`);
+      }
+      const attachments = detail.attachments || [];
+      if (attachments.length > 3 || attachments.some(file => !file.startsWith('data:image/') || file.length > 2_800_000)) {
+        throw new BadRequestException(`第 ${index + 1} 行最多上传3张、每张不超过2MB的图片`);
+      }
+      return { ...detail, quantity, weight, unitPrice, amount, attachments };
+    });
     // 自动通过 customerCode 查找 customerId（若未传）
     let customerId = data.customerId;
     if (!customerId && data.customerCode) {
@@ -209,6 +219,46 @@ export class InboundService {
       if (cust) customerId = cust.id;
     }
     if (!customerId) throw new BadRequestException('客户不存在或未提供客户ID');
+    const [customerRecord] = await this.db.select({
+      id: customer.id, name: customer.name, code: customer.code, deletedAt: customer.deletedAt,
+    }).from(customer).where(eq(customer.id, customerId));
+    if (!customerRecord || customerRecord.deletedAt) throw new BadRequestException('客户不存在或已停用');
+
+    details = await Promise.all(details.map(async (detail: any, index: number) => {
+      let productRecord;
+      if (detail.productId) {
+        [productRecord] = await this.db.select().from(productTable)
+          .where(eq(productTable.id, detail.productId)).limit(1);
+      } else if (detail.productCode) {
+        [productRecord] = await this.db.select().from(productTable)
+          .where(eq(productTable.code, detail.productCode)).limit(1);
+      }
+      if (!productRecord || productRecord.deletedAt || productRecord.status === 'inactive') {
+        throw new BadRequestException(`第 ${index + 1} 行产品不存在或已停用`);
+      }
+      if (productRecord.customerCode !== customerRecord.code) {
+        throw new BadRequestException(`产品 ${productRecord.name} 不属于客户 ${customerRecord.name}`);
+      }
+      const unit = productRecord.unit || '件';
+      if (unit === 'kg' && detail.weight <= 0) throw new BadRequestException(`产品 ${productRecord.name} 必须填写重量`);
+      const unitPrice = Number(productRecord.unitPrice || 0);
+      const billingQuantity = unit === 'kg' ? detail.weight : detail.quantity;
+      return {
+        ...detail,
+        productId: productRecord.id,
+        productName: productRecord.name,
+        material: productRecord.material,
+        process: productRecord.process,
+        techRequirement: productRecord.techRequirement,
+        productModel: productRecord.workpieceNo,
+        unit,
+        unitPrice,
+        amount: Math.round(unitPrice * billingQuantity * 100) / 100,
+      };
+    }));
+    const totalAmount = details.reduce((sum, detail) => sum + detail.amount, 0);
+    const totalQuantity = details.reduce((sum, detail) => sum + detail.quantity, 0);
+    const totalWeight = details.reduce((sum, detail) => sum + detail.weight, 0);
 
     // 计算金额转分
     const totalAmountCents = yuanToCents(totalAmount);
@@ -229,14 +279,15 @@ export class InboundService {
       }
     }
 
+    const order = await this.db.transaction(async (tx) => {
     // 创建入库单
-    const orderResult = await this.db
+    const orderResult = await tx
       .insert(inboundOrder)
       .values({
         inboundNo,
         customerId,
-        customerName: data.customerName,
-        customerCode: data.customerCode,
+        customerName: customerRecord.name,
+        customerCode: customerRecord.code,
         inboundDate: data.inboundDate,
         inboundTime: data.inboundTime || null,
         creator: data.creator,
@@ -255,11 +306,11 @@ export class InboundService {
     const order = orderResult[0];
 
     // 创建明细、批次并更新库存
-    for (const rawDetail of data.details) {
+    for (const rawDetail of details) {
       // 自动通过 productCode 查找 productId（若未传）
       let productId = (rawDetail as any).productId;
       if (!productId && (rawDetail as any).productCode) {
-        const [prod] = await this.db
+        const [prod] = await tx
           .select({ id: product.id })
           .from(product)
           .where(eq(product.code, (rawDetail as any).productCode))
@@ -269,7 +320,7 @@ export class InboundService {
       if (!productId) throw new BadRequestException(`产品不存在: ${(rawDetail as any).productCode || 'unknown'}`);
       const detail = { ...rawDetail, productId };
       // 创建明细
-      const [detailRecord] = await this.db.insert(inboundDetail).values({
+      await tx.insert(inboundDetail).values({
         inboundId: order.id,
         productId: detail.productId,
         productName: detail.productName,
@@ -285,18 +336,29 @@ export class InboundService {
         material: detail.material || null,
         techRequirement: detail.techRequirement || null,
         urgent: detail.urgent || false,
-      }).returning();
+        attachments: detail.attachments,
+      });
 
       // 生成或使用传入的批次号
-      const batchNo = detail.batchNo || this.generateBatchNo(data.customerCode);
+      const batchNo = detail.batchNo || this.generateBatchNo(customerRecord.code);
 
       // 创建批次
-      await this.db.insert(productBatchTable).values({
+      const [batch] = await tx.insert(productBatchTable).values({
         batchNo,
         productId: detail.productId,
         inboundOrderId: order.id,
         quantity: detail.quantity,
         weight: detail.weight,
+      }).returning({ id: productBatchTable.id });
+
+      await tx.insert(productBatchStockTable).values({
+        batchId: batch.id,
+        productId: detail.productId,
+        quantityAvailable: detail.quantity,
+        weightAvailable: detail.weight,
+        lockedQuantity: 0,
+        lockedWeight: 0,
+        status: 'active',
       });
 
       // 更新产品库存
@@ -307,15 +369,15 @@ export class InboundService {
         referenceNo: order.inboundNo,
         operator: data.creator,
         remark: `入库单创建：${order.inboundNo}`,
-      });
+      }, tx);
 
       // 更新产品累计入库数量（带乐观锁）
-      const [currentProduct] = await this.db
+      const [currentProduct] = await tx
         .select({ version: productTable.version })
         .from(productTable)
         .where(eq(productTable.id, detail.productId));
       
-      await this.db
+      const updated = await tx
         .update(productTable)
         .set({
           inboundQuantity: sql`${productTable.inboundQuantity} + ${detail.quantity}`,
@@ -325,20 +387,16 @@ export class InboundService {
         })
         .where(and(
           eq(productTable.id, detail.productId),
-          eq(productTable.version, currentProduct?.[0]?.version || 0)
-        ));
+          eq(productTable.version, currentProduct?.version || 0)
+        )).returning({ id: productTable.id });
+      if (updated.length === 0) throw new ConflictException(`产品 ${detail.productName} 库存版本冲突，请重试`);
     }
 
     // 更新客户入库统计
-    await this.updateCustomerInboundStats(customerId, data.inboundDate);
-
-    // 同步到飞书多维表格（异步，不阻塞主流程）
-    this.syncToFeishuInbound(order, data).catch(err =>
-      this.logger.warn(`飞书同步来货登记失败：${err.message}`),
-    );
+    await this.updateCustomerInboundStats(customerId, data.inboundDate, tx);
 
     // 记录操作日志
-    await this.db.insert(operationLogTable).values({
+    await tx.insert(operationLogTable).values({
       entityType: 'inbound_order',
       entityId: order.id,
       operation: 'create',
@@ -346,14 +404,29 @@ export class InboundService {
       afterState: JSON.stringify({
         inboundNo: order.inboundNo,
         customerId,
-        customerName: data.customerName,
+        customerName: customerRecord.name,
         totalQuantity,
         totalWeight,
         totalAmount,
-        details: data.details,
+        details,
       }),
       source: 'web',
     });
+    return order;
+    });
+
+    // 仅在数据库事务成功提交后触发外部同步。
+    this.syncToFeishuInbound(order, {
+      ...data,
+      customerName: customerRecord.name,
+      customerCode: customerRecord.code,
+      details,
+      totalAmount,
+      totalQuantity,
+      totalWeight,
+    }).catch(err =>
+      this.logger.warn(`飞书同步来货登记失败：${err.message}`),
+    );
 
     return this.findById(order.id);
   }
@@ -366,9 +439,9 @@ export class InboundService {
   }
 
   // 更新客户入库统计 - 修复：使用原子更新避免竞态条件
-  private async updateCustomerInboundStats(customerId: string, inboundDate: Date) {
+  private async updateCustomerInboundStats(customerId: string, inboundDate: Date, database: any = this.db) {
     // 更新总入库次数和最后入库日期
-    await this.db
+    await database
       .update(customer)
       .set({
         inboundCount: sql`${customer.inboundCount} + 1`,
@@ -378,7 +451,7 @@ export class InboundService {
 
     // 修复：原子更新月入库次数，使用子查询避免竞态条件
     const startOfMonth = new Date(inboundDate.getFullYear(), inboundDate.getMonth(), 1);
-    await this.db.execute(sql`
+    await database.execute(sql`
       UPDATE customer 
       SET inbound_count_monthly = (
         SELECT count(*)::int 
@@ -432,8 +505,8 @@ export class InboundService {
     referenceNo: string;
     operator: string;
     remark?: string;
-  }) {
-    const [productRecord] = await this.db
+  }, database: any = this.db) {
+    const [productRecord] = await database
       .select({
         id: productTable.id,
         name: productTable.name,
@@ -450,7 +523,7 @@ export class InboundService {
     const newStock = productRecord.stock + params.quantity;
     const newStockWeight = (productRecord.stockWeight || 0) + (params.weight || 0);
 
-    await this.db
+    await database
       .update(productTable)
       .set({
         stock: newStock,
@@ -459,7 +532,7 @@ export class InboundService {
       .where(eq(productTable.id, params.productId));
 
     // 记录库存变动
-    await this.db.insert(inventoryRecordTable).values({
+    await database.insert(inventoryRecordTable).values({
       productId: params.productId,
       productName: productRecord.name,
       changeType: 'inbound',
@@ -778,6 +851,7 @@ export class InboundService {
 
   private async syncToFeishuInbound(order: any, data: any) {
     if (!this.bitableSyncService) return;
+    const orgCode = getCurrentTenantContext()?.orgCode;
     for (const detail of data.details) {
       await this.bitableSyncService.syncInbound({
         orderId: order.inboundNo,
@@ -788,7 +862,7 @@ export class InboundService {
         createdAt: data.inboundDate,
         createdBy: data.creator,
         status: '待处理',
-      });
+      }, orgCode);
     }
   }
 }

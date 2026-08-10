@@ -2,9 +2,9 @@ import { Injectable, Inject, ConflictException, BadRequestException, NotFoundExc
 import { eq, and, desc, asc, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import {
-  DRIZZLE_DATABASE,
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
+import { TENANT_DATABASE } from '../../common/tenant-database.provider';
 import { 
   productBatchTable,
   productBatchStockTable,
@@ -35,7 +35,7 @@ export interface OutboundBatchSelection {
 @Injectable()
 export class BatchService {
   constructor(
-    @Inject(DRIZZLE_DATABASE) private readonly db: PostgresJsDatabase,
+    @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
   ) {}
 
   /**
@@ -75,6 +75,7 @@ export class BatchService {
       // 创建批次库存记录
       await this.db.insert(productBatchStockTable).values({
         batchId: batch.id,
+        productId: params.productId,
         quantityAvailable: params.quantity,
         weightAvailable: params.weight || 0,
         lockedQuantity: 0,

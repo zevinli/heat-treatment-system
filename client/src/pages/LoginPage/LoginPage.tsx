@@ -4,18 +4,10 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Badge } from '@/components/ui/badge';
 import { Package, Lock, User, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { setCurrentUser, getCurrentUser } from '@/pages/PermissionPage/PermissionPage';
-
-// 模拟用户数据库
-const MOCK_USERS = [
-  { id: '1', username: 'admin', password: 'admin123', name: '系统管理员', roleId: '1', roleName: '系统管理员', department: '技术部' },
-  { id: '2', username: 'shouhuo', password: '123456', name: '收货员', roleId: '2', roleName: '收货员', department: '收货部' },
-  { id: '3', username: 'fahuo', password: '123456', name: '发货员', roleId: '3', roleName: '发货员', department: '发货部' },
-  { id: '4', username: 'caiwu', password: '123456', name: '财务', roleId: '4', roleName: '财务人员', department: '财务部' },
-];
+import { axiosForBackend } from '@lark-apaas/client-toolkit/utils/getAxiosForBackend';
 
 const LoginPage: React.FC = () => {
   const navigate = useNavigate();
@@ -42,48 +34,41 @@ const LoginPage: React.FC = () => {
 
     setIsLoading(true);
 
-    // 模拟登录延迟
-    setTimeout(() => {
-      const user = MOCK_USERS.find(
-        (u) => u.username === username && u.password === password
-      );
-
-      if (user) {
+    try {
+      const response = await axiosForBackend.post('/api/auth/login', {
+        username: username.trim(),
+        password,
+        deviceName: navigator.userAgent,
+      });
+      const { token, user } = response.data;
+      if (!token || !user?.id) throw new Error('登录响应无效');
+      const roleMap: Record<string, { id: string; name: string }> = {
+        admin: { id: '1', name: '系统管理员' },
+        operator: { id: '5', name: '操作员' },
+        finance: { id: '4', name: '财务人员' },
+        viewer: { id: '5', name: '只读成员' },
+      };
+      const mappedRole = roleMap[user.role] || roleMap.viewer;
+      localStorage.setItem('authToken', token);
         const userInfo = {
           id: user.id,
           username: user.username,
           name: user.name,
-          roleId: user.roleId,
-          roleName: user.roleName,
-          department: user.department,
+          roleId: mappedRole.id,
+          roleName: mappedRole.name,
+          department: user.department || '',
           status: 'active' as const,
-          lastLogin: new Date().toLocaleString('zh-CN'),
-          deviceLimit: 3,
+          lastLogin: user.lastLogin || new Date().toLocaleString('zh-CN'),
+          deviceLimit: user.deviceLimit || 1,
         };
-
         setCurrentUser(userInfo);
         toast.success(`欢迎回来，${user.name}！`);
-        navigate('/');
-      } else {
-        toast.error('用户名或密码错误');
-      }
-
+        navigate('/organizations');
+    } catch (error: any) {
+      localStorage.removeItem('authToken');
+      toast.error(error?.response?.data?.error?.message || error?.response?.data?.message || error.message || '登录失败');
+    } finally {
       setIsLoading(false);
-    }, 800);
-  };
-
-  const handleQuickLogin = (type: string) => {
-    const users: Record<string, { username: string; password: string }> = {
-      admin: { username: 'admin', password: 'admin123' },
-      shouhuo: { username: 'shouhuo', password: '123456' },
-      fahuo: { username: 'fahuo', password: '123456' },
-      caiwu: { username: 'caiwu', password: '123456' },
-    };
-
-    const creds = users[type];
-    if (creds) {
-      setUsername(creds.username);
-      setPassword(creds.password);
     }
   };
 
@@ -152,39 +137,6 @@ const LoginPage: React.FC = () => {
               </Button>
             </form>
 
-            <div className="mt-6">
-              <p className="text-sm text-muted-foreground text-center mb-3">快速登录（演示）</p>
-              <div className="flex flex-wrap gap-2 justify-center">
-                <Badge
-                  variant="outline"
-                  className="cursor-pointer hover:bg-primary hover:text-primary-foreground"
-                  onClick={() => handleQuickLogin('admin')}
-                >
-                  管理员
-                </Badge>
-                <Badge
-                  variant="outline"
-                  className="cursor-pointer hover:bg-primary hover:text-primary-foreground"
-                  onClick={() => handleQuickLogin('shouhuo')}
-                >
-                  收货员
-                </Badge>
-                <Badge
-                  variant="outline"
-                  className="cursor-pointer hover:bg-primary hover:text-primary-foreground"
-                  onClick={() => handleQuickLogin('fahuo')}
-                >
-                  发货员
-                </Badge>
-                <Badge
-                  variant="outline"
-                  className="cursor-pointer hover:bg-primary hover:text-primary-foreground"
-                  onClick={() => handleQuickLogin('caiwu')}
-                >
-                  财务
-                </Badge>
-              </div>
-            </div>
           </CardContent>
         </Card>
 

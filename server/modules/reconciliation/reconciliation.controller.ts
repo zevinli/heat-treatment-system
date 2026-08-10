@@ -8,6 +8,7 @@ import {
   Param,
   Query,
   Req,
+  BadRequestException,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ReconciliationService } from './reconciliation.service';
@@ -105,6 +106,12 @@ export class ReconciliationController {
   }
 
   @NeedLogin()
+  @Put(':id/confirm')
+  async confirm(@Param('id') id: string) {
+    return this.reconciliationService.confirm(id);
+  }
+
+  @NeedLogin()
   @Put(':id/unaudit')
   async unaudit(
     @Param('id') id: string,
@@ -113,7 +120,7 @@ export class ReconciliationController {
   ) {
     const { userId } = req.userContext;
     if (!reason || reason.trim().length < 10) {
-      throw new Error('反审核原因不能为空且至少10个字');
+      throw new BadRequestException('反审核原因不能为空且至少10个字');
     }
     return this.reconciliationService.unaudit(id, userId, reason);
   }

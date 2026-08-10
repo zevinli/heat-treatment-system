@@ -12,14 +12,12 @@ import { logger } from '@lark-apaas/client-toolkit/logger';
  * @param filename 文件名（不含扩展名）
  */
 export const exportToExcel = async (
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   data: any[],
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   columns: { key: string; title: string; formatter?: (value: unknown, row: any) => string | number }[],
   filename: string
 ) => {
   try {
-    const XLSX = await import('xlsx');
+    const XLSX = await import('@e965/xlsx');
     
     // 转换数据格式
     const exportData = data.map(row => {

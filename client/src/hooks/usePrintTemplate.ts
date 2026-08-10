@@ -128,6 +128,12 @@ const DEFAULT_RECONCILIATION_CONFIG: ITemplateConfig = {
 
 // Storage keys
 const STORAGE_KEYS = {
+  processCard: 'processCard',
+  deliveryNote: 'deliveryNote',
+  reconciliation: 'reconciliation',
+};
+const GLOBAL_STORAGE_KEY = '__global_heat_print_templates';
+const LEGACY_STORAGE_KEYS: Record<string, string> = {
   processCard: 'print_template_process_card',
   deliveryNote: 'print_template_delivery_note',
   reconciliation: 'print_template_reconciliation',
@@ -136,10 +142,17 @@ const STORAGE_KEYS = {
 // 获取存储的模板配置
 const getStoredTemplate = (key: string, defaultConfig: ITemplateConfig): ITemplateConfig => {
   try {
-    const stored = localStorage.getItem(key);
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      return { ...defaultConfig, ...parsed };
+    const registry = localStorage.getItem(GLOBAL_STORAGE_KEY);
+    if (registry) {
+      const parsed = JSON.parse(registry);
+      if (parsed?.[key]) return { ...defaultConfig, ...parsed[key] };
+    }
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEYS[key]);
+    if (legacy) {
+      const parsed = JSON.parse(legacy);
+      const migrated = { ...defaultConfig, ...parsed };
+      saveTemplateToStorage(key, migrated);
+      return migrated;
     }
   } catch {
     // ignore
@@ -150,7 +163,8 @@ const getStoredTemplate = (key: string, defaultConfig: ITemplateConfig): ITempla
 // 保存模板配置到存储
 const saveTemplateToStorage = (key: string, config: ITemplateConfig) => {
   try {
-    localStorage.setItem(key, JSON.stringify(config));
+    const current = JSON.parse(localStorage.getItem(GLOBAL_STORAGE_KEY) || '{}');
+    localStorage.setItem(GLOBAL_STORAGE_KEY, JSON.stringify({ ...current, [key]: config }));
   } catch {
     // ignore
   }

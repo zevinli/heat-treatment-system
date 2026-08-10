@@ -9,7 +9,7 @@
  * 5. 数据质量报告 - 全面的数据验证
  */
 
-import * as XLSX from 'xlsx';
+import * as XLSX from '@e965/xlsx';
 import { toast } from 'sonner';
 import type {
   ImportPreviewState,

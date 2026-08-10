@@ -1,10 +1,11 @@
 import { Injectable, NestMiddleware, UnauthorizedException, ForbiddenException, Logger, Inject } from '@nestjs/common';
 import type { Request, Response, NextFunction } from 'express';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { DRIZZLE_DATABASE } from '@lark-apaas/fullstack-nestjs-core';
 import { TenantConnectionService } from '../../modules/tenant/tenant-connection.service';
 import { organization, organizationUser } from '../../database/schema';
 import { TENANT_CONTEXT, type TenantContext } from '../decorators/tenant.decorator';
+import { tenantAsyncStorage } from '../tenant-context.storage';
 
 /**
  * 租户中间件
@@ -25,11 +26,6 @@ export class TenantMiddleware implements NestMiddleware {
       const orgCode = this.extractOrgCode(req);
 
       if (!orgCode) {
-        // 检查是否有配置了数据库的组织，如果没有则允许所有请求通过（本地开发/初始安装）
-        const hasConfiguredOrgs = await this.hasConfiguredOrganizations();
-        if (!hasConfiguredOrgs) {
-          return next();
-        }
         // 如果是公开路由（如登录、组织列表），允许继续
         if (this.isPublicRoute(req.path)) {
           return next();
@@ -66,23 +62,13 @@ export class TenantMiddleware implements NestMiddleware {
         }
       }
 
-      // 5. 获取租户数据库连接（如果数据库配置不完整则跳过，使用主数据库）
-      try {
-        const tenantDb = await this.tenantConnectionService.getTenantDb(orgCode, this.masterDb);
-        // 6. 将租户上下文附加到请求
-        const tenantContext: TenantContext = {
-          orgCode,
-          orgId,
-          db: tenantDb,
-        };
-        (req as any)[TENANT_CONTEXT] = tenantContext;
-        this.logger.debug(`Tenant context set for: ${orgCode}, user: ${userId}`);
-      } catch (dbError: any) {
-        // 如果租户数据库连接失败（如配置不完整），使用主数据库
-        this.logger.warn(`租户数据库连接失败，使用主数据库: ${orgCode}, error: ${dbError.message}`);
-      }
+      // 5. 获取租户数据库连接。生产环境禁止静默回退主库，避免跨租户数据泄漏。
+      const tenantDb = await this.tenantConnectionService.getTenantDb(orgCode, this.masterDb);
+      const tenantContext: TenantContext = { orgCode, orgId, db: tenantDb };
+      (req as any)[TENANT_CONTEXT] = tenantContext;
+      this.logger.debug(`Tenant context set for: ${orgCode}, user: ${userId}`);
 
-      next();
+      tenantAsyncStorage.run(tenantContext, next);
     } catch (error) {
       this.logger.error('Tenant middleware error:', error instanceof Error ? error.message : String(error));
       next(error);
@@ -100,16 +86,18 @@ export class TenantMiddleware implements NestMiddleware {
       return headerCode;
     }
 
-    // 2. 从子域名获取（如：dalian.example.com）
-    const host = req.headers.host || '';
-    const subdomain = host.split('.')[0];
-    if (subdomain && !['www', 'app', 'api', 'localhost', 'localhost:3000', 'localhost:5000'].some(excluded => host.startsWith(excluded))) {
-      return subdomain;
+    // 2. 仅在明确配置的基础域名下启用子域名租户识别。
+    // Railway/Vercel 等平台域名绝不能被误认为组织编码。
+    const baseDomain = process.env.TENANT_BASE_DOMAIN?.trim().toLowerCase();
+    const host = (req.hostname || req.headers.host || '').split(':')[0].toLowerCase();
+    if (baseDomain && host.endsWith(`.${baseDomain}`)) {
+      const subdomain = host.slice(0, -(baseDomain.length + 1)).split('.').pop();
+      if (subdomain && !['www', 'app', 'api'].includes(subdomain)) return subdomain;
     }
 
-    // 3. 从查询参数获取（用于开发/测试）
+    // 3. 查询参数只允许在非生产环境用于开发/测试
     const queryCode = req.query.org as string;
-    if (queryCode) {
+    if (queryCode && process.env.NODE_ENV !== 'production') {
       return queryCode;
     }
 
@@ -169,10 +157,9 @@ export class TenantMiddleware implements NestMiddleware {
    */
   private isPublicRoute(path: string): boolean {
     const publicRoutes = [
-      '/api/organizations',
-      '/api/organizations/list',
-      '/api/organizations/create',
-      '/api/organizations/join',
+      '/api/tenant/my-organizations',
+      '/api/tenant/organizations',
+      '/api/tenant/join',
       '/api/auth/login',
       '/api/auth/callback',
       '/api/health',
@@ -181,27 +168,4 @@ export class TenantMiddleware implements NestMiddleware {
     return publicRoutes.some(route => path.startsWith(route));
   }
 
-  /**
-   * 检查是否有配置了完整数据库信息的组织
-   * 如果没有任何组织有 DB 配置（dbHost, dbUser, dbPassword），
-   * 说明是本地开发环境，跳过租户检查
-   */
-  private async hasConfiguredOrganizations(): Promise<boolean> {
-    try {
-      const result = await this.masterDb
-        .select({ id: organization.id })
-        .from(organization)
-        .where(
-          and(
-            sql`${organization.dbHost} IS NOT NULL`,
-            sql`${organization.dbUser} IS NOT NULL`,
-            sql`${organization.dbPassword} IS NOT NULL`,
-          ),
-        )
-        .limit(1);
-      return result.length > 0;
-    } catch {
-      return false;
-    }
-  }
 }

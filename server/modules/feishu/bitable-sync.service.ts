@@ -91,13 +91,17 @@ export class BitableSyncService {
   private async getAppToken(orgCode?: string): Promise<string> {
     const config = await this.getTenantConfig(orgCode);
     if (config) return config.bitableAppToken;
+    if (orgCode) return '';
     return process.env.FEISHU_BITABLE_APP_TOKEN || '';
   }
 
   private async getTenantConfig(orgCode?: string): Promise<FeishuTenantConfig | null> {
     if (!this.tenantConfigService) return null;
     // 如果传了 orgCode 则用，否则尝试从环境变量兼容
-    if (orgCode) return this.tenantConfigService.getConfig(orgCode);
+    if (orgCode) {
+      const config = await this.tenantConfigService.getConfig(orgCode);
+      return config?.isActive ? config : null;
+    }
     return null;
   }
 
@@ -119,6 +123,8 @@ export class BitableSyncService {
       };
       return map[tableKey] || '';
     }
+    // 多租户请求绝不能回退到全局表，避免把一个组织的数据写进另一个组织的飞书表。
+    if (orgCode) return '';
     // Fallback 到环境变量（单租户模式兼容）
     const envMap: Record<string, string | undefined> = {
       inbound: process.env.FEISHU_TABLE_INBOUND,
@@ -131,9 +137,11 @@ export class BitableSyncService {
   }
 
   /** 同步单条来货登记 */
-  async syncInbound(data: InboundSyncData): Promise<SyncResult> {
+  async syncInbound(data: InboundSyncData, orgCode?: string): Promise<SyncResult> {
     if (!this.auth.isConfigured()) return this.skipped('inbound');
-    return this.upsertRecord(await this.resolveTableId("inbound"), FIELD_NAMES.inbound.orderId, data.orderId, {
+    const [tableId, appToken] = await Promise.all([this.resolveTableId('inbound', orgCode), this.getAppToken(orgCode)]);
+    if (!tableId || !appToken) return this.missingConfig('inbound');
+    return this.upsertRecord(appToken, tableId, FIELD_NAMES.inbound.orderId, data.orderId, {
       [FIELD_NAMES.inbound.orderId]: data.orderId,
       [FIELD_NAMES.inbound.customerName]: data.customerName,
       [FIELD_NAMES.inbound.productName]: data.productName,
@@ -146,9 +154,11 @@ export class BitableSyncService {
   }
 
   /** 同步单条发货记录 */
-  async syncOutbound(data: OutboundSyncData): Promise<SyncResult> {
+  async syncOutbound(data: OutboundSyncData, orgCode?: string): Promise<SyncResult> {
     if (!this.auth.isConfigured()) return this.skipped('outbound');
-    return this.upsertRecord(await this.resolveTableId("outbound"), FIELD_NAMES.outbound.orderId, data.orderId, {
+    const [tableId, appToken] = await Promise.all([this.resolveTableId('outbound', orgCode), this.getAppToken(orgCode)]);
+    if (!tableId || !appToken) return this.missingConfig('outbound');
+    return this.upsertRecord(appToken, tableId, FIELD_NAMES.outbound.orderId, data.orderId, {
       [FIELD_NAMES.outbound.orderId]: data.orderId,
       [FIELD_NAMES.outbound.customerName]: data.customerName,
       [FIELD_NAMES.outbound.productName]: data.productName,
@@ -161,13 +171,15 @@ export class BitableSyncService {
   }
 
   /** 全量刷新库存快照表 */
-  async syncInventoryFull(items: InventorySyncData[]): Promise<SyncResult> {
+  async syncInventoryFull(items: InventorySyncData[], orgCode?: string): Promise<SyncResult> {
     if (!this.auth.isConfigured()) return this.skipped('inventory');
     try {
+      const [tableId, appToken] = await Promise.all([this.resolveTableId('inventory', orgCode), this.getAppToken(orgCode)]);
+      if (!tableId || !appToken) return this.missingConfig('inventory');
       // 1. 清空现有记录
-      await this.clearTable(await this.resolveTableId("inventory"));
+      await this.clearTable(appToken, tableId);
       // 2. 批量写入
-      await this.batchCreate(await this.resolveTableId("inventory"), items.map(item => ({
+      await this.batchCreate(appToken, tableId, items.map(item => ({
         [FIELD_NAMES.inventory.productName]: item.productName,
         [FIELD_NAMES.inventory.material]: item.material,
         [FIELD_NAMES.inventory.currentStock]: item.currentStock,
@@ -184,9 +196,11 @@ export class BitableSyncService {
   }
 
   /** 同步客户总览 */
-  async syncCustomer(data: CustomerSyncData): Promise<SyncResult> {
+  async syncCustomer(data: CustomerSyncData, orgCode?: string): Promise<SyncResult> {
     if (!this.auth.isConfigured()) return this.skipped('customer');
-    return this.upsertRecord(await this.resolveTableId("customer"), FIELD_NAMES.customer.name, data.name, {
+    const [tableId, appToken] = await Promise.all([this.resolveTableId('customer', orgCode), this.getAppToken(orgCode)]);
+    if (!tableId || !appToken) return this.missingConfig('customer');
+    return this.upsertRecord(appToken, tableId, FIELD_NAMES.customer.name, data.name, {
       [FIELD_NAMES.customer.name]: data.name,
       [FIELD_NAMES.customer.contact]: data.contact,
       [FIELD_NAMES.customer.phone]: data.phone,
@@ -199,10 +213,12 @@ export class BitableSyncService {
   }
 
   /** 同步每日对账 */
-  async syncReconciliation(data: ReconciliationSyncData): Promise<SyncResult> {
+  async syncReconciliation(data: ReconciliationSyncData, orgCode?: string): Promise<SyncResult> {
     if (!this.auth.isConfigured()) return this.skipped('reconciliation');
+    const [tableId, appToken] = await Promise.all([this.resolveTableId('reconciliation', orgCode), this.getAppToken(orgCode)]);
+    if (!tableId || !appToken) return this.missingConfig('reconciliation');
     const matchValue = `${data.date}_${data.customerName}`;
-    return this.upsertRecord(await this.resolveTableId("reconciliation"), FIELD_NAMES.reconciliation.date, matchValue, {
+    return this.upsertRecord(appToken, tableId, FIELD_NAMES.reconciliation.date, matchValue, {
       [FIELD_NAMES.reconciliation.date]: this.toTimestamp(data.date),
       [FIELD_NAMES.reconciliation.customerName]: data.customerName,
       [FIELD_NAMES.reconciliation.outboundAmount]: data.outboundAmount,
@@ -220,12 +236,12 @@ export class BitableSyncService {
    * 按字段值查找记录 — 返回 record_id 或 null
    */
   private async findRecordByField(
+    appToken: string,
     tableId: string,
     fieldName: string,
     fieldValue: string,
   ): Promise<string | null> {
     const client = await this.auth.getAuthorizedClient();
-    const appToken = this.getAppToken();
 
     try {
       const encodedValue = encodeURIComponent(fieldValue);
@@ -249,11 +265,11 @@ export class BitableSyncService {
    * 创建单条记录
    */
   private async createRecord(
+    appToken: string,
     tableId: string,
     fields: Record<string, any>,
   ): Promise<string | null> {
     const client = await this.auth.getAuthorizedClient();
-    const appToken = this.getAppToken();
 
     try {
       await this.rateLimit();
@@ -276,12 +292,12 @@ export class BitableSyncService {
    * 更新单条记录
    */
   private async updateRecord(
+    appToken: string,
     tableId: string,
     recordId: string,
     fields: Record<string, any>,
   ): Promise<boolean> {
     const client = await this.auth.getAuthorizedClient();
-    const appToken = this.getAppToken();
 
     try {
       await this.rateLimit();
@@ -304,18 +320,19 @@ export class BitableSyncService {
    * Upsert：存在则更新，不存在则创建
    */
   private async upsertRecord(
+    appToken: string,
     tableId: string,
     matchField: string,
     matchValue: string,
     fields: Record<string, any>,
   ): Promise<SyncResult> {
     try {
-      const existingId = await this.findRecordByField(tableId, matchField, matchValue);
+      const existingId = await this.findRecordByField(appToken, tableId, matchField, matchValue);
       if (existingId) {
-        const ok = await this.updateRecord(tableId, existingId, fields);
+        const ok = await this.updateRecord(appToken, tableId, existingId, fields);
         return { table: tableId, action: ok ? 'update' : 'skip', affected: ok ? 1 : 0 };
       } else {
-        await this.createRecord(tableId, fields);
+        await this.createRecord(appToken, tableId, fields);
         return { table: tableId, action: 'create', affected: 1 };
       }
     } catch (error: any) {
@@ -327,9 +344,8 @@ export class BitableSyncService {
   /**
    * 清空整表（删除全部记录）
    */
-  private async clearTable(tableId: string): Promise<void> {
+  private async clearTable(appToken: string, tableId: string): Promise<void> {
     const client = await this.auth.getAuthorizedClient();
-    const appToken = this.getAppToken();
 
     try {
       let hasMore = true;
@@ -358,11 +374,11 @@ export class BitableSyncService {
    * 批量创建记录（自动分批，飞书限制单次 500 条）
    */
   private async batchCreate(
+    appToken: string,
     tableId: string,
     records: Array<Record<string, any>>,
   ): Promise<void> {
     const client = await this.auth.getAuthorizedClient();
-    const appToken = this.getAppToken();
     const batchSize = SYNC_CONFIG.BATCH_CREATE_MAX;
 
     for (let i = 0; i < records.length; i += batchSize) {
@@ -400,6 +416,10 @@ export class BitableSyncService {
    */
   private skipped(table: string): SyncResult {
     return { table, action: 'skip', affected: 0 };
+  }
+
+  private missingConfig(table: string): SyncResult {
+    return { table, action: 'skip', affected: 0, error: '当前组织未配置飞书多维表格 App Token 或数据表 ID' };
   }
 
   /**

@@ -33,7 +33,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { getCustomerById, updateCustomer, getProducts } from '@/api';
+import { getCustomerById, updateCustomer, getProducts, getCustomerActivity } from '@/api';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Customer } from '@shared/api.interface';
 
@@ -101,6 +101,12 @@ const CustomerDetailPage: React.FC = () => {
   });
 
   const products = productsData?.items || [];
+
+  const { data: activityData } = useQuery({
+    queryKey: ['customer-activity', id],
+    queryFn: () => getCustomerActivity(id!),
+    enabled: !!id,
+  });
 
   // 更新客户 mutation
   const updateMutation = useMutation({
@@ -192,18 +198,9 @@ const CustomerDetailPage: React.FC = () => {
     }
   };
 
-  // 模拟交易记录（实际应从后端获取）
-  const mockTransactions: ITransaction[] = [
-    { id: '1', date: '2025-01-28', orderNo: 'IN20250128001', type: 'inbound', productName: '齿轮轴', quantity: 100, amount: 2550, status: 'completed' },
-    { id: '2', date: '2025-01-25', orderNo: 'OUT20250125002', type: 'outbound', productName: '轴承套', quantity: 50, amount: 1880, status: 'completed' },
-    { id: '3', date: '2025-01-20', orderNo: 'IN20250120003', type: 'inbound', productName: '法兰盘', quantity: 200, amount: 2400, status: 'completed' },
-    { id: '4', date: '2025-01-18', orderNo: 'OUT20250118004', type: 'outbound', productName: '传动轴', quantity: 80, amount: 2848, status: 'completed' },
-    { id: '5', date: '2025-01-15', orderNo: 'REC20250115001', type: 'reconciliation', productName: '月度对账单', quantity: 1, amount: 12500, status: 'completed' },
-  ];
-
-  const inboundRecords = mockTransactions.filter(t => t.type === 'inbound');
-  const outboundRecords = mockTransactions.filter(t => t.type === 'outbound');
-  const reconciliationRecords = mockTransactions.filter(t => t.type === 'reconciliation');
+  const transactions: ITransaction[] = activityData?.transactions || [];
+  const inboundRecords = transactions.filter(t => t.type === 'inbound');
+  const outboundRecords = transactions.filter(t => t.type === 'outbound');
 
   // 加载中状态
   if (isLoading) {
@@ -231,7 +228,7 @@ const CustomerDetailPage: React.FC = () => {
 
   return (
     <>
-      <style jsx>{`
+      <style>{`
         .customer-detail-page {
           animation: fadeIn 0.3s ease-out;
         }
@@ -465,7 +462,7 @@ const CustomerDetailPage: React.FC = () => {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {mockTransactions.map((transaction) => (
+                        {transactions.map((transaction) => (
                           <TableRow key={transaction.id}>
                             <TableCell>{transaction.date}</TableCell>
                             <TableCell className="font-medium">{transaction.orderNo}</TableCell>

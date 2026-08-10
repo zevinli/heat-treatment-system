@@ -35,6 +35,10 @@ export const capabilityClient = {
       console.log('[CapabilityClient] Calling', method, 'on', capabilityId);
       return { success: true, content: '', data: {} };
     },
+    async *callStream<T = any>(method: string, params?: Record<string, unknown>): AsyncGenerator<T> {
+      console.log('[CapabilityClient] Streaming', method, 'on', capabilityId, params);
+      yield { content: '智能分析服务尚未配置，请联系管理员配置后重试。' } as T;
+    },
   }),
   async run(config: { capabilityId: string; params?: Record<string, unknown> }): Promise<any> {
     console.log('[CapabilityClient] Running:', config.capabilityId);

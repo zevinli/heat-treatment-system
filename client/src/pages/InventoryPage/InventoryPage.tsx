@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   SearchIcon,
   FilterIcon,
@@ -47,6 +47,8 @@ import { useData, IInventoryRecord, IInventorySummary } from '@/data/DataContext
 import { exportToExcel, getInventoryExportColumns } from '@/utils/excelExport';
 import { cn } from '@/lib/utils';
 import { ChangeTypeBadge, ChangeTypeWithAmount } from '@/components/ChangeTypeBadge';
+import { usePermissions } from '@/hooks/usePermission';
+import * as api from '@/api';
 
 const materialOptions = [
   { value: '40Cr', label: '40Cr' },
@@ -68,10 +70,14 @@ const InventoryPage: React.FC = () => {
     products: rawProducts,
     customers: rawCustomers,
     inventoryRecords: rawInventoryRecords,
-    increaseStock,
-    decreaseStock,
     getInventorySummary,
+    refreshProducts,
+    refreshInventoryRecords,
   } = useData();
+  const { permissions, roles } = usePermissions();
+  const canApproveAdjustments = roles.includes('admin') || permissions.includes('inventory:approve');
+  const canAdjustDirectly = roles.includes('admin') || permissions.includes('inventory:adjust');
+  const canRequestAdjustment = canAdjustDirectly || permissions.includes('inventory:request-adjust');
 
   // 防御性处理：确保数据是数组
   const products = Array.isArray(rawProducts) ? rawProducts : [];
@@ -99,7 +105,19 @@ const InventoryPage: React.FC = () => {
   const [adjustWeight, setAdjustWeight] = useState('');
   const [adjustReason, setAdjustReason] = useState('');
   const [adjustRemark, setAdjustRemark] = useState('');
-  const [currentUser] = useState('管理员');
+  const [approvalRequests, setApprovalRequests] = useState<api.InventoryAdjustmentRequest[]>([]);
+  const [adjustSubmitting, setAdjustSubmitting] = useState(false);
+
+  const loadApprovalRequests = useCallback(async () => {
+    if (!canApproveAdjustments) return;
+    try {
+      setApprovalRequests(await api.getInventoryAdjustmentRequests());
+    } catch (error: any) {
+      toast.error(error?.message || '加载库存审批失败');
+    }
+  }, [canApproveAdjustments]);
+
+  useEffect(() => { void loadApprovalRequests(); }, [loadApprovalRequests]);
 
   // 调整原因选项
   const adjustReasonOptions = [
@@ -257,7 +275,7 @@ const InventoryPage: React.FC = () => {
   };
 
   // 提交库存调整
-  const handleAdjustSubmit = () => {
+  const handleAdjustSubmit = async () => {
     if (!selectedProduct) return;
 
     const quantity = parseInt(adjustQuantity) || 0;
@@ -266,6 +284,10 @@ const InventoryPage: React.FC = () => {
     // 验证至少输入一个值
     if (quantity <= 0 && weight <= 0) {
       toast.error('请输入数量或重量');
+      return;
+    }
+    if (!adjustReason) {
+      toast.error('请选择调整原因');
       return;
     }
 
@@ -296,30 +318,46 @@ const InventoryPage: React.FC = () => {
 
     const reasonLabel = adjustReasonOptions.find(r => r.value === adjustReason)?.label || '';
     const remarkText = [reasonLabel, adjustRemark].filter(Boolean).join(' - ');
-
-    if (adjustType === 'increase') {
-      increaseStock({
-        productId: selectedProduct.productId,
-        quantity: quantity || 1, // 如果没输数量，默认1件
-        weight: weight || undefined,
-        changeType: 'manual_increase',
-        operator: currentUser,
-        remark: remarkText || '手动增加库存',
-      });
-      toast.success(`已成功增加 ${selectedProduct.productName} 库存`);
-    } else {
-      decreaseStock({
-        productId: selectedProduct.productId,
-        quantity: quantity || 1,
-        weight: weight || undefined,
-        changeType: 'manual_decrease',
-        operator: currentUser,
-        remark: remarkText || '手动减少库存',
-      });
-      toast.success(`已成功减少 ${selectedProduct.productName} 库存`);
+    if (!canRequestAdjustment) {
+      toast.error('当前账号没有库存调整或申请权限');
+      return;
     }
+    const direction = adjustType === 'increase' ? 1 : -1;
+    const payload = {
+      productId: selectedProduct.productId,
+      quantityChange: direction * quantity,
+      weightChange: direction * weight,
+      reason: adjustReason as 'inventory_profit' | 'inventory_loss' | 'damage' | 'quality_reject' | 'other',
+      remark: remarkText || undefined,
+    };
+    setAdjustSubmitting(true);
+    try {
+      if (canAdjustDirectly) {
+        await api.adjustStock(payload);
+        await Promise.all([refreshProducts(), refreshInventoryRecords()]);
+        toast.success(`${selectedProduct.productName} 库存已调整`);
+      } else {
+        await api.requestInventoryAdjustment(payload);
+        toast.success('库存调整申请已提交，等待管理员审批');
+      }
+      setAdjustDialogOpen(false);
+    } catch (error: any) {
+      toast.error(error?.response?.data?.message || error?.message || '库存调整失败');
+    } finally {
+      setAdjustSubmitting(false);
+    }
+  };
 
-    setAdjustDialogOpen(false);
+  const decideApproval = async (request: api.InventoryAdjustmentRequest, approved: boolean) => {
+    const rejectReason = approved ? undefined : window.prompt('请输入拒绝原因（必填）')?.trim();
+    if (!approved && !rejectReason) return;
+    try {
+      await api.decideInventoryAdjustment(request.id, approved, rejectReason);
+      await Promise.all([loadApprovalRequests(), refreshProducts(), refreshInventoryRecords()]);
+      toast.success(approved ? '库存调整已批准并执行' : '库存调整已拒绝');
+    } catch (error: any) {
+      toast.error(error?.response?.data?.message || error?.message || '审批失败');
+    }
   };
 
   // 获取产品的库存记录
@@ -424,6 +462,7 @@ const InventoryPage: React.FC = () => {
             className="h-7 w-7 p-0 text-success"
             onClick={() => openAdjustDialog(record, 'increase')}
             title="入库"
+            disabled={!canRequestAdjustment}
           >
             <ArrowUpIcon className="w-4 h-4" />
           </Button>
@@ -432,7 +471,7 @@ const InventoryPage: React.FC = () => {
             size="sm"
             className="h-7 w-7 p-0 text-destructive"
             onClick={() => openAdjustDialog(record, 'decrease')}
-            disabled={record.currentStock <= 0}
+            disabled={record.currentStock <= 0 || !canRequestAdjustment}
             title="出库"
           >
             <ArrowDownIcon className="w-4 h-4" />
@@ -661,6 +700,15 @@ const InventoryPage: React.FC = () => {
               <Badge variant="secondary" className="ml-1 text-xs">{inventoryRecords.length}</Badge>
             )}
           </TabsTrigger>
+          {canApproveAdjustments && (
+            <TabsTrigger value="approvals" className="gap-1">
+              <CheckCircleIcon className="w-4 h-4" />
+              调整审批
+              {approvalRequests.filter(item => item.status === 'pending').length > 0 && (
+                <Badge variant="secondary">{approvalRequests.filter(item => item.status === 'pending').length}</Badge>
+              )}
+            </TabsTrigger>
+          )}
         </TabsList>
 
         {/* 库存列表 */}
@@ -797,6 +845,46 @@ const InventoryPage: React.FC = () => {
             </CardContent>
           </Card>
         </TabsContent>
+
+        {canApproveAdjustments && (
+          <TabsContent value="approvals" className="mt-0">
+            <Card>
+              <CardHeader><CardTitle className="text-lg">库存调整审批</CardTitle></CardHeader>
+              <CardContent>
+                {approvalRequests.length === 0 ? (
+                  <Empty className="py-12"><EmptyDescription>暂无库存调整申请</EmptyDescription></Empty>
+                ) : (
+                  <div className="space-y-3">
+                    {approvalRequests.map(request => {
+                      const payload = request.payload;
+                      const product = inventorySummary.find(item => item.productId === request.entityId);
+                      return (
+                        <div key={request.id} className="rounded-lg border p-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                          <div className="space-y-1 text-sm">
+                            <div className="font-medium">{product?.productName || request.entityId}</div>
+                            <div className="text-muted-foreground">
+                              申请人：{request.requester}；数量：{payload?.quantityChange ?? '-'}；重量：{payload?.weightChange ?? '-'} kg
+                            </div>
+                            <div className="text-muted-foreground">原因：{request.reason}</div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge variant="outline">{request.status === 'pending' ? '待审批' : request.status === 'approved' ? '已批准' : request.status === 'rejected' ? '已拒绝' : '处理中'}</Badge>
+                            {request.status === 'pending' && (
+                              <>
+                                <Button size="sm" onClick={() => void decideApproval(request, true)}>批准</Button>
+                                <Button size="sm" variant="outline" onClick={() => void decideApproval(request, false)}>拒绝</Button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+        )}
       </Tabs>
 
       {/* 库存调整弹窗 */}
@@ -917,10 +1005,11 @@ const InventoryPage: React.FC = () => {
           <DialogFooter>
             <Button variant="outline" onClick={() => setAdjustDialogOpen(false)}>取消</Button>
             <Button
-              onClick={handleAdjustSubmit}
+              onClick={() => void handleAdjustSubmit()}
+              disabled={adjustSubmitting}
               className={adjustType === 'increase' ? 'bg-success hover:bg-success/90' : 'bg-destructive hover:bg-destructive/90'}
             >
-              确认{adjustType === 'increase' ? '增加' : '减少'}
+              {adjustSubmitting ? '提交中...' : canAdjustDirectly ? `确认${adjustType === 'increase' ? '增加' : '减少'}` : '提交审批申请'}
             </Button>
           </DialogFooter>
         </DialogContent>

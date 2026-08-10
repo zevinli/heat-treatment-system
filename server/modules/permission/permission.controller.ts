@@ -1,5 +1,5 @@
 import { Controller, Get, Post, Body, Param, Req, Logger } from '@nestjs/common';
-import { NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
+import { CanRole, NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
 import { PermissionService, PermissionCode } from './permission.service';
 import type { Request } from 'express';
 
@@ -10,17 +10,14 @@ export class PermissionController {
 
   @Get('me')
   async getMyPermissions(@Req() req: Request) {
-    const userId = req.userContext?.userId;
-    if (!userId) {
+    const context = req.userContext;
+    if (!context?.userId) {
       return { permissions: [], roles: [] };
     }
-
-    const [permissions, roles] = await Promise.all([
-      this.permissionService.getUserPermissions(userId),
-      this.permissionService.getUserRoles(userId),
-    ]);
-
-    return { permissions, roles };
+    return {
+      permissions: context.permissions || [],
+      roles: [context.userRole],
+    };
   }
 
   @Get('roles')
@@ -37,23 +34,13 @@ export class PermissionController {
   }
 
   @Post('assign')
+  @NeedLogin()
+  @CanRole('system:permission')
   async assignRole(
     @Body() data: { userId: string; roleName: string },
     @Req() req: Request,
   ) {
-    const currentUserId = req.userContext?.userId;
-    
-    // 检查当前用户是否有权限管理权限
-    const hasPermission = await this.permissionService.hasPermission(
-      currentUserId!,
-      'system:permission',
-    );
-    
-    if (!hasPermission) {
-      return { success: false, message: '无权分配角色' };
-    }
-
-    return this.permissionService.assignRole(data.userId, data.roleName);
+    return this.permissionService.assignRole(data.userId, data.roleName, req.userContext!.userId);
   }
 
   @Post('check')
@@ -66,12 +53,19 @@ export class PermissionController {
       return { hasPermission: false };
     }
 
-    const hasPermission = await this.permissionService.hasPermission(
-      userId,
-      data.permission,
-    );
+    const permissions = req.userContext?.permissions || [];
+    return {
+      hasPermission: req.userContext?.userRole === 'admin'
+        || permissions.includes(data.permission)
+        || permissions.includes('*'),
+    };
+  }
 
-    return { hasPermission };
+  @NeedLogin()
+  @CanRole('system:permission')
+  @Get('logs')
+  getOperationLogs() {
+    return this.permissionService.getOperationLogs();
   }
 
   /**
@@ -79,6 +73,7 @@ export class PermissionController {
    * 危险操作，需要管理员权限
    */
   @NeedLogin()
+  @CanRole('system:permission')
   @Post('reset-database')
   async resetDatabase(@Req() req: Request) {
     const userId = req.userContext?.userId;

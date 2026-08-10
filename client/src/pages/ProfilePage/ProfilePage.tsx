@@ -1,7 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCurrentUserProfile } from '@lark-apaas/client-toolkit/hooks/useCurrentUserProfile';
-import { getDataloom } from '@lark-apaas/client-toolkit/dataloom';
 import { logger } from '@lark-apaas/client-toolkit/logger';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -40,6 +39,8 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
+import { changeMyPassword, getMyProfile, updateMyProfile } from '@/api';
+import { useData } from '@/data/DataContext';
 
 // 用户信息类型
 interface UserProfile {
@@ -80,8 +81,8 @@ const AvatarUpload: React.FC<{
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (file.size > 5 * 1024 * 1024) {
-        toast.error('图片大小不能超过5MB');
+      if (file.size > 1024 * 1024) {
+        toast.error('图片大小不能超过1MB');
         return;
       }
       if (!file.type.startsWith('image/')) {
@@ -185,21 +186,20 @@ const PasswordForm: React.FC = () => {
       return;
     }
     
-    if (newPassword.length < 6) {
-      toast.error('新密码长度至少6位');
+    if (newPassword.length < 8) {
+      toast.error('新密码长度至少8位');
       return;
     }
     
     setLoading(true);
     try {
-      // 这里调用后端API修改密码
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await changeMyPassword(currentPassword, newPassword);
       toast.success('密码修改成功');
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
-    } catch (error) {
-      toast.error('密码修改失败，请重试');
+    } catch (error: any) {
+      toast.error(error?.response?.data?.message || '密码修改失败，请重试');
     } finally {
       setLoading(false);
     }
@@ -234,7 +234,7 @@ const PasswordForm: React.FC = () => {
           type="password"
           value={newPassword}
           onChange={(e) => setNewPassword(e.target.value)}
-          placeholder="请输入新密码（至少6位）"
+          placeholder="请输入新密码（至少8位）"
         />
       </div>
 
@@ -261,6 +261,7 @@ const PasswordForm: React.FC = () => {
 const ProfilePage: React.FC = () => {
   const navigate = useNavigate();
   const currentProfile = useCurrentUserProfile();
+  const { inboundOrders, outboundOrders, reconciliations } = useData();
   const [loading, setLoading] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   
@@ -271,39 +272,70 @@ const ProfilePage: React.FC = () => {
     email: (currentProfile as any)?.email || '',
     phone: (currentProfile as any)?.phone || '',
     avatar: (currentProfile as any)?.avatar,
-    department: '热处理车间',
-    position: '仓库管理员',
-    joinDate: '2024-01-15',
-    location: '北京',
+    department: '',
+    position: '',
+    joinDate: '',
+    location: '',
   });
 
   // 编辑状态
   const [isEditing, setIsEditing] = useState(false);
   const [editedProfile, setEditedProfile] = useState(profile);
 
-  // 业务统计
-  const [stats, setStats] = useState<BusinessStats>({
-    monthlyInbound: 128,
-    monthlyOutbound: 96,
-    monthlyReconciliation: 45,
-    completionRate: 87,
-    pendingTasks: 12,
-    totalTasks: 156,
-  });
+  useEffect(() => {
+    void getMyProfile().then((user) => {
+      const next: UserProfile = {
+        id: user.id,
+        name: user.name || '',
+        email: user.email || '',
+        phone: user.phone || '',
+        avatar: user.avatar || undefined,
+        department: user.department || '',
+        position: user.position || '',
+        joinDate: user.createdAt ? new Date(user.createdAt).toLocaleDateString('zh-CN') : '',
+        location: user.location || '',
+      };
+      setProfile(next);
+      setEditedProfile(next);
+    }).catch((error) => logger.error('加载个人资料失败', error));
+  }, []);
+
+  const stats = useMemo<BusinessStats>(() => {
+    const month = new Date().toISOString().slice(0, 7);
+    const monthlyInbound = inboundOrders.filter(order => order.inboundDate?.startsWith(month)).length;
+    const monthlyOutbound = outboundOrders.filter(order => order.outboundDate?.startsWith(month)).length;
+    const monthlyReconciliation = reconciliations.filter(order => order.month === month).length;
+    const pendingTasks = outboundOrders.filter(order => order.status === 'pending_reconciliation').length
+      + reconciliations.filter(order => ['draft', 'confirmed', 'audited', 'invoiced', 'partial_paid'].includes(order.status)).length;
+    const totalTasks = inboundOrders.length + outboundOrders.length + reconciliations.length;
+    return {
+      monthlyInbound,
+      monthlyOutbound,
+      monthlyReconciliation,
+      pendingTasks,
+      totalTasks,
+      completionRate: totalTasks ? Math.round(((totalTasks - pendingTasks) / totalTasks) * 100) : 100,
+    };
+  }, [inboundOrders, outboundOrders, reconciliations]);
 
   // 头像上传
   const handleAvatarUpload = async (file: File) => {
     setUploadingAvatar(true);
     try {
-      const dataloom = await getDataloom();
-      const bucketId = await (dataloom.storage as any).getDefaultBucketId();
-      const result = await (dataloom.storage as any).uploadFile(bucketId, file);
-      
-      setProfile(prev => ({ ...prev, avatar: result.download_url }));
+      if (file.size > 1024 * 1024) throw new Error('头像大小不能超过1MB');
+      const avatar = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('读取头像失败'));
+        reader.readAsDataURL(file);
+      });
+      await updateMyProfile({ avatar });
+      setProfile(prev => ({ ...prev, avatar }));
+      setEditedProfile(prev => ({ ...prev, avatar }));
       toast.success('头像上传成功');
-    } catch (error) {
+    } catch (error: any) {
       logger.error('头像上传失败:', error);
-      toast.error('头像上传失败');
+      toast.error(error?.response?.data?.message || error.message || '头像上传失败');
     } finally {
       setUploadingAvatar(false);
     }
@@ -313,13 +345,27 @@ const ProfilePage: React.FC = () => {
   const handleSaveProfile = async () => {
     setLoading(true);
     try {
-      // 这里调用后端API保存用户信息
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      setProfile(editedProfile);
+      const saved = await updateMyProfile({
+        name: editedProfile.name,
+        email: editedProfile.email,
+        phone: editedProfile.phone,
+        department: editedProfile.department,
+        position: editedProfile.position,
+        location: editedProfile.location,
+      });
+      const next = { ...editedProfile, name: saved.name };
+      setProfile(next);
+      setEditedProfile(next);
+      const stored = localStorage.getItem('__global_heat_current_user');
+      if (stored) {
+        try {
+          localStorage.setItem('__global_heat_current_user', JSON.stringify({ ...JSON.parse(stored), name: saved.name, department: saved.department || '' }));
+        } catch { /* 忽略旧缓存格式 */ }
+      }
       setIsEditing(false);
       toast.success('个人资料保存成功');
-    } catch (error) {
-      toast.error('保存失败，请重试');
+    } catch (error: any) {
+      toast.error(error?.response?.data?.message || '保存失败，请重试');
     } finally {
       setLoading(false);
     }
@@ -441,23 +487,20 @@ const ProfilePage: React.FC = () => {
             <StatCard
               title="本月入库"
               value={stats.monthlyInbound}
-              description="较上月 +12%"
+              description="实时业务数据"
               icon={<Package className="w-5 h-5" />}
-              trend={{ value: 12, positive: true }}
             />
             <StatCard
               title="本月出库"
               value={stats.monthlyOutbound}
-              description="较上月 +8%"
+              description="实时业务数据"
               icon={<TrendingUp className="w-5 h-5" />}
-              trend={{ value: 8, positive: true }}
             />
             <StatCard
               title="本月对账"
               value={stats.monthlyReconciliation}
-              description="较上月 -3%"
+              description="实时业务数据"
               icon={<FileText className="w-5 h-5" />}
-              trend={{ value: -3, positive: false }}
             />
           </div>
 

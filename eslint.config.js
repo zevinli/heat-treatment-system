@@ -1,8 +1,15 @@
 const tseslint = require('typescript-eslint');
-const { eslintPresetsOfSimple } = require('@lark-apaas/fullstack-presets');
+let eslintPresetsOfSimple = { client: [], server: [] };
+try {
+  ({ eslintPresetsOfSimple } = require('@lark-apaas/fullstack-presets'));
+} catch {
+  // The open-source/local package does not ship the platform-only preset.
+  // TypeScript parsing still runs; CI environments that provide the preset
+  // automatically receive the full platform rule set.
+}
 
 module.exports = tseslint.config(
-  { ignores: ['dist', 'node_modules', 'client/src/api/gen'] },
+  { ignores: ['dist', 'node_modules', 'client/src/api/gen', 'server/scripts/clean-orphan-batches.ts', 'server/scripts/fix-inventory-record-types.ts'] },
   // Client configuration
   {
     files: ['client/**/*.{ts,tsx}', 'shared/**/*.{ts,tsx}'],
@@ -10,6 +17,7 @@ module.exports = tseslint.config(
       ...eslintPresetsOfSimple.client,
     ],
     languageOptions: {
+      parser: tseslint.parser,
       parserOptions: {
         project: './tsconfig.app.json',
       },
@@ -34,6 +42,7 @@ module.exports = tseslint.config(
       ...eslintPresetsOfSimple.server,
     ],
     languageOptions: {
+      parser: tseslint.parser,
       parserOptions: {
         project: './tsconfig.node.json',
       }

@@ -86,7 +86,7 @@ import {
   SwitchCamera,
 } from "lucide-react";
 import { useCurrentUserProfile } from "@lark-apaas/client-toolkit/hooks/useCurrentUserProfile";
-import { getDataloom } from "@lark-apaas/client-toolkit/dataloom";
+import { axiosForBackend } from "@lark-apaas/client-toolkit/utils/getAxiosForBackend";
 import { cn } from "@/lib/utils";
 import { useEffect, useState } from "react";
 import { logger } from "@lark-apaas/client-toolkit/logger";
@@ -322,11 +322,14 @@ const UserMenu = () => {
 
   const handleLogout = async () => {
     try {
-      const dataloom = await getDataloom();
-      await dataloom.service.session.signOut();
-      window.location.reload();
+      await axiosForBackend.post('/api/auth/logout');
     } catch (error) {
       logger.error('登出失败:', error);
+    } finally {
+      localStorage.removeItem('authToken');
+      localStorage.removeItem('heat_treatment_current_user');
+      clearTenant();
+      navigate('/login', { replace: true });
     }
   };
 

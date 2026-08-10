@@ -1,5 +1,6 @@
 import { logger } from '@lark-apaas/client-toolkit/logger';
 import { axiosForBackend } from '@lark-apaas/client-toolkit/utils/getAxiosForBackend';
+import type { Customer, Product, PaginatedResponse } from '@shared/api.interface';
 
 // 重试配置
 const RETRY_CONFIG = {
@@ -47,7 +48,7 @@ async function withRetry<T>(
 
 // ======== 客户管理 API ========
 
-export async function getCustomers(params?: { search?: string; status?: string; page?: number; pageSize?: number }) {
+export async function getCustomers(params?: { search?: string; status?: string; page?: number; pageSize?: number }): Promise<PaginatedResponse<Customer>> {
   return withRetry(async () => {
     const response = await axiosForBackend({
       url: '/api/customers',
@@ -69,6 +70,67 @@ export async function getCustomerById(id: string) {
     logger.error('获取客户详情失败', error);
     throw error;
   }
+}
+
+export interface AuthUserRecord {
+  id: string;
+  username: string;
+  name: string;
+  role: 'admin' | 'operator' | 'finance' | 'viewer';
+  department?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  avatar?: string | null;
+  position?: string | null;
+  location?: string | null;
+  status?: 'active' | 'inactive';
+  deviceLimit: number;
+  lastLogin?: string | null;
+  createdAt?: string | null;
+}
+
+export async function getMyProfile(): Promise<AuthUserRecord> {
+  const response = await axiosForBackend({ url: '/api/auth/me', method: 'GET' });
+  return response.data;
+}
+
+export async function updateMyProfile(data: {
+  name?: string; email?: string; phone?: string; avatar?: string;
+  department?: string; position?: string; location?: string;
+}): Promise<AuthUserRecord> {
+  const response = await axiosForBackend({ url: '/api/auth/me', method: 'PUT', data });
+  return response.data;
+}
+
+export async function changeMyPassword(currentPassword: string, newPassword: string) {
+  const response = await axiosForBackend({
+    url: '/api/auth/me/password', method: 'PUT', data: { currentPassword, newPassword },
+  });
+  return response.data;
+}
+
+export async function getAuthUsers(): Promise<AuthUserRecord[]> {
+  const response = await axiosForBackend({ url: '/api/auth/users', method: 'GET' });
+  return response.data;
+}
+
+export async function createAuthUser(data: {
+  username: string; password: string; name: string; role: string; department?: string; deviceLimit?: number;
+}): Promise<AuthUserRecord> {
+  const response = await axiosForBackend({ url: '/api/auth/users', method: 'POST', data });
+  return response.data;
+}
+
+export async function updateAuthUser(id: string, data: {
+  name?: string; role?: string; department?: string; status?: 'active' | 'inactive'; deviceLimit?: number;
+}): Promise<AuthUserRecord> {
+  const response = await axiosForBackend({ url: `/api/auth/users/${id}`, method: 'PUT', data });
+  return response.data;
+}
+
+export async function resetAuthUserPassword(id: string, password: string) {
+  const response = await axiosForBackend({ url: `/api/auth/users/${id}/password`, method: 'PUT', data: { password } });
+  return response.data;
 }
 
 export async function createCustomer(data: {
@@ -148,7 +210,7 @@ export async function getProducts(params?: {
   process?: string;
   page?: number;
   pageSize?: number;
-}) {
+}): Promise<PaginatedResponse<Product>> {
   try {
     const response = await axiosForBackend({
       url: '/api/products',
@@ -395,7 +457,8 @@ export async function getInventoryRecords(params?: {
 export async function adjustStock(data: {
   productId: string;
   quantityChange: number;
-  operator: string;
+  weightChange?: number;
+  reason: 'inventory_profit' | 'inventory_loss' | 'damage' | 'quality_reject' | 'other';
   remark?: string;
 }) {
   try {
@@ -409,6 +472,53 @@ export async function adjustStock(data: {
     logger.error('调整库存失败', error);
     throw error;
   }
+}
+
+export type InventoryAdjustmentRequest = {
+  id: string;
+  entityId: string;
+  requester: string;
+  reason: string;
+  status: 'pending' | 'processing' | 'approved' | 'rejected';
+  payload?: {
+    productId: string;
+    quantityChange: number;
+    weightChange: number;
+    reason: string;
+    remark?: string;
+  };
+  requestedAt: string;
+  approver?: string;
+  rejectReason?: string;
+};
+
+export async function requestInventoryAdjustment(data: {
+  productId: string;
+  quantityChange: number;
+  weightChange?: number;
+  reason: 'inventory_profit' | 'inventory_loss' | 'damage' | 'quality_reject' | 'other';
+  remark?: string;
+}) {
+  const response = await axiosForBackend({ url: '/api/inventory/adjustment-requests', method: 'POST', data });
+  return response.data;
+}
+
+export async function getInventoryAdjustmentRequests(status?: string): Promise<InventoryAdjustmentRequest[]> {
+  const response = await axiosForBackend({ url: '/api/inventory/adjustment-requests', method: 'GET', params: { status } });
+  return response.data;
+}
+
+export async function decideInventoryAdjustment(id: string, approved: boolean, rejectReason?: string): Promise<void> {
+  await axiosForBackend({
+    url: `/api/inventory/adjustment-requests/${id}`,
+    method: 'PUT',
+    data: { approved, rejectReason },
+  });
+}
+
+export async function getSystemOperationLogs() {
+  const response = await axiosForBackend({ url: '/api/permissions/logs', method: 'GET' });
+  return response.data;
 }
 
 // ======== 出库单管理 API ========
@@ -664,7 +774,7 @@ export async function getReconciliations(params?: {
 export async function getReconciliationById(id: string) {
   try {
     const response = await axiosForBackend({
-      url: `/api/reconciliations/${id}`,
+      url: `/api/reconciliations/${id}/amounts`,
       method: 'GET',
     });
     return response.data;
@@ -818,6 +928,19 @@ export async function auditReconciliation(id: string, auditor: string) {
     return response.data;
   } catch (error) {
     logger.error('审核对账单失败', error);
+    throw error;
+  }
+}
+
+export async function confirmReconciliation(id: string) {
+  try {
+    const response = await axiosForBackend({
+      url: `/api/reconciliations/${id}/confirm`,
+      method: 'PUT',
+    });
+    return response.data;
+  } catch (error) {
+    logger.error('确认对账单失败', error);
     throw error;
   }
 }

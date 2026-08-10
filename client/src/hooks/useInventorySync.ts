@@ -19,11 +19,12 @@ interface SyncState {
   pendingChanges: InventoryChange[];
 }
 
-// 模拟库存同步服务
 class InventorySyncService {
   private listeners: Set<(change: InventoryChange) => void> = new Set();
   private syncInterval: NodeJS.Timeout | null = null;
   private isRunning = false;
+  private refresh: (() => Promise<void>) | null = null;
+  private inFlight: Promise<void> | null = null;
 
   // 添加监听器
   onInventoryChange(callback: (change: InventoryChange) => void) {
@@ -36,15 +37,22 @@ class InventorySyncService {
     this.listeners.forEach((callback) => callback(change));
   }
 
-  // 开始同步
-  start() {
+  async sync(refresh = this.refresh) {
+    if (!refresh) return;
+    if (this.inFlight) return this.inFlight;
+    this.inFlight = refresh().finally(() => {
+      this.inFlight = null;
+    });
+    return this.inFlight;
+  }
+
+  // 单例轮询：无论多少组件订阅，全局只发起一组30秒请求。
+  start(refresh: () => Promise<void>) {
+    this.refresh = refresh;
     if (this.isRunning) return;
     this.isRunning = true;
-
-    // 模拟定期同步（每30秒）
     this.syncInterval = setInterval(() => {
-      // 这里可以添加与后端的同步逻辑
-      logger.info('库存同步检查...');
+      void this.sync().catch((error) => logger.warn('库存自动同步失败', error));
     }, 30000);
   }
 
@@ -62,7 +70,7 @@ class InventorySyncService {
 const syncService = new InventorySyncService();
 
 export const useInventorySync = () => {
-  const { products } = useData();
+  const { products, refreshProducts } = useData();
   const [syncState, setSyncState] = useState<SyncState>({
     isConnected: true,
     lastSyncTime: Date.now(),
@@ -106,8 +114,7 @@ export const useInventorySync = () => {
     setSyncState((prev) => ({ ...prev, isConnected: false }));
 
     try {
-      // 模拟同步请求
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await syncService.sync(refreshProducts);
 
       setSyncState({
         isConnected: true,
@@ -117,23 +124,33 @@ export const useInventorySync = () => {
 
       toast.success('库存数据同步成功');
     } catch (error) {
-      setSyncState((prev) => ({ ...prev, isConnected: true }));
+      setSyncState((prev) => ({ ...prev, isConnected: false }));
       toast.error('库存同步失败');
     }
-  }, []);
+  }, [refreshProducts]);
 
   // 监听库存变更
   useEffect(() => {
-    syncService.start();
+    syncService.start(refreshProducts);
 
     const unsubscribe = syncService.onInventoryChange(() => {
       // 数据变更通知
     });
 
+    const channel = typeof BroadcastChannel !== 'undefined'
+      ? new BroadcastChannel('heat-inventory-sync')
+      : null;
+    channel?.addEventListener('message', () => {
+      void syncService.sync(refreshProducts).then(() => {
+        setSyncState((prev) => ({ ...prev, isConnected: true, lastSyncTime: Date.now() }));
+      }).catch(() => setSyncState((prev) => ({ ...prev, isConnected: false })));
+    });
+
     return () => {
       unsubscribe();
+      channel?.close();
     };
-  }, []);
+  }, [refreshProducts]);
 
   // 检查库存预警
   const checkStockAlerts = useCallback(
@@ -179,6 +196,10 @@ export const useInventorySync = () => {
   );
 
   return {
+    inventoryData: products,
+    lastSyncTime: new Date(syncState.lastSyncTime),
+    isSyncing: !syncState.isConnected,
+    forceSync: manualSync,
     syncState,
     recentChanges,
     recordChange,
@@ -205,6 +226,11 @@ export const useCrossTabSync = () => {
 
   const notifyOtherTabs = useCallback(() => {
     localStorage.setItem('inventory_last_update', Date.now().toString());
+    if (typeof BroadcastChannel !== 'undefined') {
+      const channel = new BroadcastChannel('heat-inventory-sync');
+      channel.postMessage({ type: 'inventory-updated', at: Date.now() });
+      channel.close();
+    }
   }, []);
 
   return { notifyOtherTabs };

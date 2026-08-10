@@ -7,8 +7,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Checkbox } from '@/components/ui/checkbox';
-import { AlertTriangle, Plus, Search, Edit, Trash2, Key, Eye, Shield, User, FileText, Lock, Settings, Database, Trash, X } from 'lucide-react';
+import { AlertTriangle, Plus, Search, Edit, Key, Eye, Shield, User, FileText, Lock, Settings, Database, Trash, X } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Table } from '@lark-apaas/client-toolkit/antd-table';
 import type { TableProps } from '@lark-apaas/client-toolkit/antd-table';
@@ -73,7 +72,20 @@ interface IUser {
   status: 'active' | 'inactive';
   lastLogin: string;
   deviceLimit: number;
+  password?: string;
 }
+
+const roleIdToServerRole = (roleId?: string) => roleId === '1'
+  ? 'admin'
+  : roleId === '4'
+    ? 'finance'
+    : roleId === '5'
+      ? 'viewer'
+      : 'operator';
+const serverRoleToRole = (role: string) => role === 'admin'
+  ? { id: '1', name: '系统管理员' }
+  : role === 'finance' ? { id: '4', name: '财务人员' }
+    : role === 'viewer' ? { id: '5', name: '只读用户' } : { id: '2', name: '操作员' };
 
 // 日志数据类型
 interface ILog {
@@ -99,20 +111,11 @@ const initialRoles: IRole[] = [
   },
   {
     id: '2',
-    name: '收货员',
-    description: '负责来货登记和库存管理',
-    menus: ['dashboard', 'inbound', 'inventory', 'products'],
-    actions: ['view', 'create', 'edit', 'print'],
-    userCount: 2,
-    createdAt: '2024-01-01',
-  },
-  {
-    id: '3',
-    name: '发货员',
-    description: '负责快速发货和出库',
-    menus: ['dashboard', 'outbound', 'inventory'],
-    actions: ['view', 'create', 'edit', 'print'],
-    userCount: 2,
+    name: '操作员',
+    description: '业务操作与查看，不含权限管理和系统设置',
+    menus: ['dashboard', 'inbound', 'outbound', 'inventory', 'reconciliation', 'statistics', 'customers', 'products'],
+    actions: ['view', 'create', 'edit', 'delete', 'export', 'print'],
+    userCount: 0,
     createdAt: '2024-01-01',
   },
   {
@@ -126,34 +129,13 @@ const initialRoles: IRole[] = [
   },
   {
     id: '5',
-    name: '普通操作员',
-    description: '基础操作权限',
-    menus: ['dashboard', 'inbound', 'outbound'],
-    actions: ['view', 'create'],
-    userCount: 3,
+    name: '只读用户',
+    description: '仅可使用各业务模块的查看权限',
+    menus: ['dashboard', 'inbound', 'outbound', 'inventory', 'reconciliation', 'statistics', 'customers', 'products'],
+    actions: ['view'],
+    userCount: 0,
     createdAt: '2024-01-01',
   },
-];
-
-// 初始化用户数据
-const initialUsers: IUser[] = [
-  { id: '1', username: 'admin', name: '管理员', roleId: '1', roleName: '系统管理员', department: '技术部', status: 'active', lastLogin: '2026-02-04 09:30', deviceLimit: 3 },
-  { id: '2', username: 'zhangsan', name: '张三', roleId: '2', roleName: '收货员', department: '收货部', status: 'active', lastLogin: '2026-02-04 08:15', deviceLimit: 2 },
-  { id: '3', username: 'lisi', name: '李四', roleId: '3', roleName: '发货员', department: '发货部', status: 'active', lastLogin: '2026-02-03 17:45', deviceLimit: 2 },
-  { id: '4', username: 'wangwu', name: '王五', roleId: '4', roleName: '财务人员', department: '财务部', status: 'active', lastLogin: '2026-02-04 10:00', deviceLimit: 1 },
-  { id: '5', username: 'zhaoliu', name: '赵六', roleId: '5', roleName: '普通操作员', department: '生产部', status: 'inactive', lastLogin: '2026-01-28 16:20', deviceLimit: 1 },
-];
-
-// 初始化日志数据
-const initialLogs: ILog[] = [
-  { id: '1', time: '2026-02-04 10:30:15', user: '张三', action: '来货登记', target: '来货单 #20250204001', ip: '192.168.1.100', details: '登记了客户"华兴机械"的来货，产品：齿轮A型，数量：100件' },
-  { id: '2', time: '2026-02-04 10:25:42', user: '李四', action: '快速发货', target: '发货单 #20250204005', ip: '192.168.1.101', details: '完成客户"精密制造"的发货，产品：轴承B型，数量：50件' },
-  { id: '3', time: '2026-02-04 10:20:08', user: '王五', action: '生成对账单', target: '对账单 #202502-001', ip: '192.168.1.102', details: '为客户"华兴机械"生成2月份对账单' },
-  { id: '4', time: '2026-02-04 10:15:33', user: '管理员', action: '修改用户', target: '用户 赵六', ip: '192.168.1.1', details: '禁用用户账号' },
-  { id: '5', time: '2026-02-04 10:10:56', user: '张三', action: '打印流程卡', target: '流程卡 #PC2025020403', ip: '192.168.1.100', details: '打印热处理流程卡' },
-  { id: '6', time: '2026-02-04 09:55:21', user: '李四', action: '打印送货单', target: '送货单 #SD2025020402', ip: '192.168.1.101', details: '打印客户送货单' },
-  { id: '7', time: '2026-02-04 09:45:10', user: '王五', action: '确认回款', target: '回款记录 #HK202502001', ip: '192.168.1.102', details: '确认客户"精密制造"回款 ￥50,000' },
-  { id: '8', time: '2026-02-04 09:30:45', user: '管理员', action: '登录系统', target: '系统', ip: '192.168.1.1', details: '成功登录系统' },
 ];
 
 // 本地存储键名
@@ -167,24 +149,8 @@ const STORAGE_KEYS = {
 // 权限检查工具
 export const checkPermission = (userRoleId: string, permissionType: 'menu' | 'action', permissionKey: string): boolean => {
   try {
-    // 从 localStorage 读取角色，如果没有则使用默认角色
-    const storedRoles = localStorage.getItem(STORAGE_KEYS.roles);
-    let roles: IRole[] = initialRoles;
-    
-    if (storedRoles) {
-      try {
-        const parsed = JSON.parse(storedRoles);
-        // 确保解析结果是数组
-        if (Array.isArray(parsed)) {
-          roles = parsed;
-        }
-      } catch (e) {
-        // 解析失败时使用默认角色
-        logger.warn('Failed to parse roles from localStorage, using defaults');
-      }
-    }
-    
-    const role = roles.find((r: IRole) => r.id === userRoleId);
+    // 角色权限由服务端固定 RBAC 定义；前端不再信任可篡改的本地角色配置。
+    const role = initialRoles.find((r: IRole) => r.id === userRoleId);
 
     // 如果找不到角色，拒绝访问
     if (!role) return false;
@@ -198,8 +164,7 @@ export const checkPermission = (userRoleId: string, permissionType: 'menu' | 'ac
     return role.actions?.includes(permissionKey) || false;
   } catch (error) {
     logger.error('Permission check error:', error);
-    // 出错时默认允许访问，避免页面崩溃
-    return true;
+    return false;
   }
 };
 
@@ -221,59 +186,56 @@ export const setCurrentUser = (user: IUser | null): void => {
     localStorage.removeItem('userId');
     localStorage.removeItem('userName');
     localStorage.removeItem('userRole');
+    localStorage.removeItem('authToken');
   }
 };
 
 const PermissionPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState('roles');
 
-  // 从 localStorage 加载数据
-  const [roles, setRoles] = useState<IRole[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.roles);
-    if (saved) return JSON.parse(saved);
-    localStorage.setItem(STORAGE_KEYS.roles, JSON.stringify(initialRoles));
-    return initialRoles;
-  });
+  const [roles] = useState<IRole[]>(initialRoles);
 
-  const [users, setUsers] = useState<IUser[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.users);
-    if (saved) return JSON.parse(saved);
-    localStorage.setItem(STORAGE_KEYS.users, JSON.stringify(initialUsers));
-    return initialUsers;
-  });
+  const [users, setUsers] = useState<IUser[]>([]);
 
-  const [logs, setLogs] = useState<ILog[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.logs);
-    if (saved) return JSON.parse(saved);
-    localStorage.setItem(STORAGE_KEYS.logs, JSON.stringify(initialLogs));
-    return initialLogs;
-  });
-
-  // 保存数据到 localStorage
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.roles, JSON.stringify(roles));
-  }, [roles]);
+  const [logs, setLogs] = useState<ILog[]>([]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.users, JSON.stringify(users));
-  }, [users]);
+    api.getAuthUsers().then(records => setUsers(records.map(record => {
+      const mapped = serverRoleToRole(record.role);
+      return {
+        id: record.id,
+        username: record.username,
+        name: record.name,
+        roleId: mapped.id,
+        roleName: mapped.name,
+        department: record.department || '',
+        status: record.status || 'active',
+        lastLogin: record.lastLogin ? new Date(record.lastLogin).toLocaleString('zh-CN') : '-',
+        deviceLimit: record.deviceLimit,
+      };
+    }))).catch(error => {
+      logger.error('加载用户失败', error);
+      toast.error('加载用户列表失败');
+    });
+  }, []);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.logs, JSON.stringify(logs));
-  }, [logs]);
+    api.getSystemOperationLogs().then(records => setLogs(records.map((record: any) => ({
+      id: record.id,
+      time: new Date(record.createdAt).toLocaleString('zh-CN'),
+      user: record.operator || '-',
+      action: record.operation || '-',
+      target: `${record.entityType || '记录'} ${record.entityId || ''}`,
+      ip: record.ipAddress || '-',
+      details: typeof record.afterState === 'string' ? record.afterState : JSON.stringify(record.afterState || record.beforeState || {}),
+    })))).catch(error => {
+      logger.error('加载操作日志失败', error);
+      toast.error('加载操作日志失败');
+    });
+  }, []);
 
   // 角色管理状态
   const [roleSearch, setRoleSearch] = useState<string | undefined>();
-  const [isRoleDialogOpen, setIsRoleDialogOpen] = useState(false);
-  const [editingRole, setEditingRole] = useState<IRole | null>(null);
-  const [roleForm, setRoleForm] = useState<Partial<IRole>>({
-    name: '',
-    description: '',
-    menus: [],
-    actions: [],
-  });
-  const [isDeleteRoleDialogOpen, setIsDeleteRoleDialogOpen] = useState(false);
-  const [deletingRoleId, setDeletingRoleId] = useState<string | null>(null);
 
   // 用户管理状态
   const [userSearch, setUserSearch] = useState<string | undefined>();
@@ -286,9 +248,11 @@ const PermissionPage: React.FC = () => {
     department: '',
     deviceLimit: 1,
     status: 'active',
+    password: '',
   });
   const [isResetPasswordDialogOpen, setIsResetPasswordDialogOpen] = useState(false);
   const [resettingUserId, setResettingUserId] = useState<string | null>(null);
+  const [newPassword, setNewPassword] = useState('');
 
   // 日志管理状态
   const [logSearch, setLogSearch] = useState('');
@@ -360,25 +324,10 @@ const PermissionPage: React.FC = () => {
     { title: '用户数', dataIndex: 'userCount', key: 'userCount', width: 80 },
     { title: '描述', dataIndex: 'description', key: 'description', ellipsis: true },
     {
-      title: '操作',
-      key: 'action',
-      width: 120,
-      render: (_, record) => (
-        <div className="flex gap-2">
-          <Button variant="ghost" size="sm" onClick={() => handleEditRole(record)}>
-            <Edit className="w-4 h-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-destructive"
-            onClick={() => handleDeleteRoleClick(record.id)}
-            disabled={record.userCount > 0}
-          >
-            <Trash2 className="w-4 h-4" />
-          </Button>
-        </div>
-      ),
+      title: '类型',
+      key: 'type',
+      width: 110,
+      render: () => <Badge variant="outline">系统固定</Badge>,
     },
   ];
 
@@ -458,75 +407,6 @@ const PermissionPage: React.FC = () => {
     },
   ];
 
-  // 角色操作处理
-  const handleAddRole = () => {
-    setEditingRole(null);
-    setRoleForm({ name: '', description: '', menus: [], actions: [] });
-    setIsRoleDialogOpen(true);
-  };
-
-  const handleEditRole = (role: IRole) => {
-    setEditingRole(role);
-    setRoleForm({
-      name: role.name,
-      description: role.description,
-      menus: [...role.menus],
-      actions: [...role.actions],
-    });
-    setIsRoleDialogOpen(true);
-  };
-
-  const handleSaveRole = () => {
-    if (!roleForm.name) {
-      toast.error('请输入角色名称');
-      return;
-    }
-
-    if (editingRole) {
-      setRoles(
-        roles.map((r) =>
-          r.id === editingRole.id
-            ? {
-                ...r,
-                name: roleForm.name || r.name,
-                description: roleForm.description || '',
-                menus: roleForm.menus || [],
-                actions: roleForm.actions || [],
-              }
-            : r
-        )
-      );
-      toast.success('角色更新成功');
-    } else {
-      const newRole: IRole = {
-        id: Date.now().toString(),
-        name: roleForm.name,
-        description: roleForm.description || '',
-        menus: roleForm.menus || [],
-        actions: roleForm.actions || [],
-        userCount: 0,
-        createdAt: new Date().toISOString().split('T')[0],
-      };
-      setRoles([...roles, newRole]);
-      toast.success('角色创建成功');
-    }
-    setIsRoleDialogOpen(false);
-  };
-
-  const handleDeleteRoleClick = (id: string) => {
-    setDeletingRoleId(id);
-    setIsDeleteRoleDialogOpen(true);
-  };
-
-  const handleConfirmDeleteRole = () => {
-    if (deletingRoleId) {
-      setRoles(roles.filter((r) => r.id !== deletingRoleId));
-      setIsDeleteRoleDialogOpen(false);
-      setDeletingRoleId(null);
-      toast.success('角色删除成功');
-    }
-  };
-
   // 用户操作处理
   const handleAddUser = () => {
     setEditingUser(null);
@@ -537,6 +417,7 @@ const PermissionPage: React.FC = () => {
       department: '',
       deviceLimit: 1,
       status: 'active',
+      password: '',
     });
     setIsUserDialogOpen(true);
   };
@@ -554,7 +435,7 @@ const PermissionPage: React.FC = () => {
     setIsUserDialogOpen(true);
   };
 
-  const handleSaveUser = () => {
+  const handleSaveUser = async () => {
     if (!userForm.username || !userForm.name || !userForm.roleId) {
       toast.error('请填写完整信息');
       return;
@@ -562,67 +443,70 @@ const PermissionPage: React.FC = () => {
 
     const role = roles.find((r) => r.id === userForm.roleId);
 
-    if (editingUser) {
-      setUsers(
-        users.map((u) =>
-          u.id === editingUser.id
-            ? {
-                ...u,
-                username: userForm.username || u.username,
-                name: userForm.name || u.name,
-                roleId: userForm.roleId || u.roleId,
-                roleName: role?.name || u.roleName,
-                department: userForm.department || '',
-                deviceLimit: userForm.deviceLimit || 1,
-                status: (userForm.status as 'active' | 'inactive') || u.status,
-              }
-            : u
-        )
-      );
-      toast.success('用户更新成功');
-    } else {
-      const newUser: IUser = {
-        id: Date.now().toString(),
-        username: userForm.username,
-        name: userForm.name,
-        roleId: userForm.roleId,
-        roleName: role?.name || '',
-        department: userForm.department || '',
-        status: (userForm.status as 'active' | 'inactive') || 'active',
-        lastLogin: '-',
-        deviceLimit: userForm.deviceLimit || 1,
+    try {
+      const serverRole = roleIdToServerRole(userForm.roleId);
+      const saved = editingUser
+        ? await api.updateAuthUser(editingUser.id, {
+          name: userForm.name,
+          role: serverRole,
+          department: userForm.department,
+          deviceLimit: userForm.deviceLimit,
+          status: userForm.status,
+        })
+        : await api.createAuthUser({
+          username: userForm.username,
+          password: userForm.password || '',
+          name: userForm.name,
+          role: serverRole,
+          department: userForm.department,
+          deviceLimit: userForm.deviceLimit,
+        });
+      const mapped = serverRoleToRole(saved.role);
+      const normalized: IUser = {
+        id: saved.id, username: saved.username, name: saved.name,
+        roleId: mapped.id, roleName: mapped.name, department: saved.department || '',
+        status: saved.status || 'active', lastLogin: saved.lastLogin ? new Date(saved.lastLogin).toLocaleString('zh-CN') : '-',
+        deviceLimit: saved.deviceLimit,
       };
-      setUsers([...users, newUser]);
-
-      // 更新角色的用户计数
-      if (role) {
-        setRoles(
-          roles.map((r) => (r.id === role.id ? { ...r, userCount: r.userCount + 1 } : r))
-        );
-      }
-      toast.success('用户创建成功');
+      setUsers(current => editingUser ? current.map(user => user.id === saved.id ? normalized : user) : [...current, normalized]);
+      toast.success(editingUser ? '用户更新成功' : '用户创建成功');
+      setIsUserDialogOpen(false);
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || '用户保存失败');
     }
-    setIsUserDialogOpen(false);
   };
 
   const handleResetPasswordClick = (id: string) => {
     setResettingUserId(id);
     setIsResetPasswordDialogOpen(true);
+    setNewPassword('');
   };
 
-  const handleConfirmResetPassword = () => {
+  const handleConfirmResetPassword = async () => {
     if (resettingUserId) {
-      const user = users.find((u) => u.id === resettingUserId);
-      toast.success(`用户 ${user?.name} 的密码已重置为：123456`);
-      setIsResetPasswordDialogOpen(false);
-      setResettingUserId(null);
+      if (newPassword.length < 8) return toast.error('新密码至少8位');
+      try {
+        await api.resetAuthUserPassword(resettingUserId, newPassword);
+        toast.success('密码已重置，用户现有登录会话已退出');
+        setIsResetPasswordDialogOpen(false);
+        setResettingUserId(null);
+      } catch (error: any) {
+        toast.error(error.response?.data?.message || '密码重置失败');
+      }
     }
   };
 
-  const handleToggleUserStatus = (id: string) => {
-    setUsers(users.map((u) => (u.id === id ? { ...u, status: u.status === 'active' ? 'inactive' : 'active' } : u)));
+  const handleToggleUserStatus = async (id: string) => {
     const user = users.find((u) => u.id === id);
-    toast.success(`用户 ${user?.name} 已${user?.status === 'active' ? '禁用' : '启用'}`);
+    if (!user) return;
+    const status = user.status === 'active' ? 'inactive' : 'active';
+    try {
+      await api.updateAuthUser(id, { status });
+      setUsers(current => current.map(item => item.id === id ? { ...item, status } : item));
+      toast.success(`用户 ${user.name} 已${status === 'inactive' ? '禁用' : '启用'}`);
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || '状态更新失败');
+    }
   };
 
   // 日志操作处理
@@ -647,21 +531,13 @@ const PermissionPage: React.FC = () => {
     try {
       await api.resetDatabase();
       
-      // 清空 localStorage 中的权限相关数据
+      // 服务端只清空业务数据并保留账号与固定 RBAC；同步移除旧版前端缓存。
       localStorage.removeItem(STORAGE_KEYS.roles);
       localStorage.removeItem(STORAGE_KEYS.users);
       localStorage.removeItem(STORAGE_KEYS.logs);
+      setLogs([]);
       
-      // 恢复初始数据到 localStorage 和状态
-      localStorage.setItem(STORAGE_KEYS.roles, JSON.stringify(initialRoles));
-      localStorage.setItem(STORAGE_KEYS.users, JSON.stringify(initialUsers));
-      localStorage.setItem(STORAGE_KEYS.logs, JSON.stringify(initialLogs));
-      
-      setRoles(initialRoles);
-      setUsers(initialUsers);
-      setLogs(initialLogs);
-      
-      toast.success('数据库已清空，系统已恢复初始化状态');
+      toast.success('业务数据已清空，账号与角色权限已保留');
       setIsResetDbDialogOpen(false);
     } catch (error: any) {
       toast.error(error.response?.data?.message || '清空数据库失败');
@@ -671,15 +547,18 @@ const PermissionPage: React.FC = () => {
   };
 
   // 筛选数据
-  const filteredRoles = roles.filter(
-    (r) => !roleSearch || r.name.includes(roleSearch) || r.description.includes(roleSearch)
-  );
+  const filteredRoles = roles
+    .map(role => ({
+      ...role,
+      userCount: users.filter(user => user.roleId === role.id).length,
+    }))
+    .filter((r) => !roleSearch || r.name.includes(roleSearch) || r.description.includes(roleSearch));
   const filteredUsers = users.filter(
     (u) => !userSearch || u.name.includes(userSearch) || u.username.includes(userSearch)
   );
   const filteredLogs = logs.filter((l) => {
     const matchSearch = !logSearch || l.user.includes(logSearch) || l.target.includes(logSearch);
-    const matchAction = !logActionFilter || l.action === logActionFilter;
+    const matchAction = !logActionFilter || logActionFilter === 'all' || l.action === logActionFilter;
     return matchSearch && matchAction;
   });
 
@@ -719,10 +598,7 @@ const PermissionPage: React.FC = () => {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>角色列表</CardTitle>
-              <Button onClick={handleAddRole} className="flex items-center gap-2">
-                <Plus className="w-4 h-4" />
-                新增角色
-              </Button>
+              <Badge variant="outline">4 个固定角色</Badge>
             </CardHeader>
             <CardContent>
               <FilterGroup gap="sm" className="mb-4">
@@ -782,13 +658,13 @@ const PermissionPage: React.FC = () => {
             </CardHeader>
             <CardContent>
               <FilterGroup gap="sm" className="mb-4">
-                <Filter value={logSearch} onValueChange={setLogSearch}>
+                <Filter value={logSearch} onValueChange={(value) => setLogSearch(value || '')}>
                   <FilterTrigger label="关键词" closable />
                   <FilterContent>
                     <FilterTextContent placeholder="搜索用户或操作对象" />
                   </FilterContent>
                 </Filter>
-                <Filter value={logActionFilter} onValueChange={setLogActionFilter}>
+                <Filter value={logActionFilter} onValueChange={(value) => setLogActionFilter(value || '')}>
                   <FilterTrigger label="操作类型" closable />
                   <FilterContent>
                     <FilterSelectContent
@@ -806,7 +682,7 @@ const PermissionPage: React.FC = () => {
                   </FilterContent>
                 </Filter>
                 {(logSearch || logActionFilter) && (
-                  <Button variant="ghost" size="sm" onClick={() => { setLogSearch(undefined); setLogActionFilter(undefined); }}>
+                  <Button variant="ghost" size="sm" onClick={() => { setLogSearch(''); setLogActionFilter(''); }}>
                     <X className="w-4 h-4 mr-1" />
                     重置
                   </Button>
@@ -941,127 +817,6 @@ const PermissionPage: React.FC = () => {
         </TabsContent>
       </Tabs>
 
-      {/* 角色编辑弹窗 */}
-      <Dialog open={isRoleDialogOpen} onOpenChange={setIsRoleDialogOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>{editingRole ? '编辑角色' : '新增角色'}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-6 py-4">
-            <div className="space-y-2">
-              <Label>
-                角色名称 <span className="text-destructive">*</span>
-              </Label>
-              <Input
-                value={roleForm.name}
-                onChange={(e) => setRoleForm({ ...roleForm, name: e.target.value })}
-                placeholder="请输入角色名称"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>角色描述</Label>
-              <Input
-                value={roleForm.description}
-                onChange={(e) => setRoleForm({ ...roleForm, description: e.target.value })}
-                placeholder="请输入角色描述"
-              />
-            </div>
-
-            {/* 菜单权限配置 */}
-            <div className="space-y-3">
-              <Label className="text-base font-medium">菜单权限配置</Label>
-              <div className="border rounded-lg p-4">
-                <div className="grid grid-cols-2 gap-3">
-                  {PERMISSIONS.menu.map((menu) => (
-                    <div key={menu.key} className="flex items-start space-x-3 p-2 rounded hover:bg-muted">
-                      <Checkbox
-                        checked={roleForm.menus?.includes(menu.key)}
-                        onCheckedChange={(checked) => {
-                          const currentMenus = roleForm.menus || [];
-                          if (checked) {
-                            setRoleForm({ ...roleForm, menus: [...currentMenus, menu.key] });
-                          } else {
-                            setRoleForm({
-                              ...roleForm,
-                              menus: currentMenus.filter((p) => p !== menu.key),
-                            });
-                          }
-                        }}
-                      />
-                      <div className="flex-1">
-                        <span className="font-medium">{menu.label}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* 操作权限配置 */}
-            <div className="space-y-3">
-              <Label className="text-base font-medium">操作权限配置</Label>
-              <div className="border rounded-lg p-4">
-                <div className="grid grid-cols-2 gap-3">
-                  {PERMISSIONS.action.map((action) => (
-                    <div key={action.key} className="flex items-start space-x-3 p-2 rounded hover:bg-muted">
-                      <Checkbox
-                        checked={roleForm.actions?.includes(action.key)}
-                        onCheckedChange={(checked) => {
-                          const currentActions = roleForm.actions || [];
-                          if (checked) {
-                            setRoleForm({ ...roleForm, actions: [...currentActions, action.key] });
-                          } else {
-                            setRoleForm({
-                              ...roleForm,
-                              actions: currentActions.filter((p) => p !== action.key),
-                            });
-                          }
-                        }}
-                      />
-                      <div className="flex-1">
-                        <span className="font-medium">{action.label}</span>
-                        <p className="text-xs text-muted-foreground">{action.description}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsRoleDialogOpen(false)}>
-              取消
-            </Button>
-            <Button onClick={handleSaveRole} disabled={!roleForm.name}>
-              保存
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 删除角色确认弹窗 */}
-      <Dialog open={isDeleteRoleDialogOpen} onOpenChange={setIsDeleteRoleDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>确认删除角色</DialogTitle>
-          </DialogHeader>
-          <Alert variant="destructive">
-            <AlertTriangle className="w-4 h-4" />
-            <AlertDescription>
-              删除角色后，该角色下的用户将失去相应权限。此操作不可恢复，请谨慎操作。
-            </AlertDescription>
-          </Alert>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsDeleteRoleDialogOpen(false)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={handleConfirmDeleteRole}>
-              确认删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       {/* 用户编辑弹窗 */}
       <Dialog open={isUserDialogOpen} onOpenChange={setIsUserDialogOpen}>
         <DialogContent className="max-w-lg">
@@ -1090,6 +845,20 @@ const PermissionPage: React.FC = () => {
                 placeholder="请输入姓名"
               />
             </div>
+            {!editingUser && (
+              <div className="space-y-2">
+                <Label>
+                  初始密码 <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  type="password"
+                  value={userForm.password || ''}
+                  onChange={(e) => setUserForm({ ...userForm, password: e.target.value })}
+                  placeholder="至少8位"
+                  autoComplete="new-password"
+                />
+              </div>
+            )}
             <div className="space-y-2">
               <Label>
                 角色 <span className="text-destructive">*</span>
@@ -1151,7 +920,7 @@ const PermissionPage: React.FC = () => {
             <Button variant="outline" onClick={() => setIsUserDialogOpen(false)}>
               取消
             </Button>
-            <Button onClick={handleSaveUser} disabled={!userForm.username || !userForm.name || !userForm.roleId}>
+            <Button onClick={handleSaveUser} disabled={!userForm.username || !userForm.name || !userForm.roleId || (!editingUser && (userForm.password?.length || 0) < 8)}>
               保存
             </Button>
           </DialogFooter>
@@ -1166,15 +935,17 @@ const PermissionPage: React.FC = () => {
           </DialogHeader>
           <Alert>
             <AlertTriangle className="w-4 h-4" />
-            <AlertDescription>
-              重置密码后，该用户的密码将恢复为初始密码（默认：123456），用户下次登录时需要修改密码。
-            </AlertDescription>
+            <AlertDescription>重置密码会立即退出该用户的全部登录设备。</AlertDescription>
           </Alert>
+          <div className="space-y-2 py-2">
+            <Label>新密码</Label>
+            <Input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} placeholder="至少8位" autoComplete="new-password" />
+          </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsResetPasswordDialogOpen(false)}>
               取消
             </Button>
-            <Button onClick={handleConfirmResetPassword}>确认重置</Button>
+            <Button onClick={handleConfirmResetPassword} disabled={newPassword.length < 8}>确认重置</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
