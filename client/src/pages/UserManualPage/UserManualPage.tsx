@@ -1862,8 +1862,8 @@ manualContent['outbound'] = {
               <li><strong>收货人/司机/车牌</strong>：运输相关信息</li>
             </ul>
             <div className="flex gap-2 mt-3">
-              <Button size="sm" className="bg-green-500 hover:bg-green-600">保存发货</Button>
-              <Button size="sm" variant="outline">关单平账</Button>
+              <Button size="sm" disabled>保存发货（界面示意）</Button>
+              <Button size="sm" variant="outline" disabled>关单平账（界面示意）</Button>
             </div>
           </div>
         </div>
@@ -3191,7 +3191,7 @@ manualContent['faq'] = {
         <div className="border rounded-lg p-4">
           <h5 className="font-medium text-foreground">Q: 账号被锁定怎么办？</h5>
           <p className="text-sm text-muted-foreground mt-2">
-            A: 连续输入错误密码5次后账号会被临时锁定30分钟。您也可以联系管理员立即解锁。
+            A: 连续输入错误密码5次后账号会被临时锁定15分钟，请等待锁定时间结束后再重试。
           </p>
         </div>
 

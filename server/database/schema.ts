@@ -147,6 +147,7 @@ export const approvalRequest = pgTable("approval_request", {
   // System field: Updater (auto-filled, do not modify)
   updatedBy: userProfile("_updated_by"),
 }, (table) => [
+  uniqueIndex("idx_approval_request_pending_entity").on(table.type, table.entityId).where(sql`${table.status} = 'pending'`),
   index("idx_approval_request_approver").using("btree", table.approver.asc().nullsLast().op("record_ops")),
   index("idx_approval_request_entity").using("btree", table.entityType.asc().nullsLast().op("text_ops"), table.entityId.asc().nullsLast().op("uuid_ops")),
   index("idx_approval_request_requester").using("btree", table.requester.asc().nullsLast().op("record_ops")),
@@ -170,6 +171,8 @@ export const appUser = pgTable("app_user", {
   location: varchar({ length: 255 }),
   status: varchar({ length: 50 }).default('active').notNull(),
   deviceLimit: integer("device_limit").default(3).notNull(),
+  failedLoginAttempts: integer("failed_login_attempts").default(0).notNull(),
+  lockedUntil: customTimestamptz('locked_until'),
   lastLoginAt: customTimestamptz('last_login_at'),
   createdAt: customTimestamptz('_created_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
   updatedAt: customTimestamptz('_updated_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
@@ -855,6 +858,8 @@ export const organizationUser = pgTable("organization_user", {
   orgId: uuid("org_id").notNull(),
   userId: varchar("user_id", { length: 255 }).notNull(),
   role: varchar({ length: 255 }).default('member'),
+  /** 租户内业务角色，与组织管理角色分离，防止跨租户继承全局账号权限。 */
+  businessRole: varchar("business_role", { length: 50 }).default('operator').notNull(),
   status: varchar({ length: 255 }).default('active'),
   joinedAt: customTimestamptz('joined_at').default(sql`CURRENT_TIMESTAMP`),
   // System field: Creation time (auto-filled, do not modify)
@@ -867,7 +872,7 @@ export const organizationUser = pgTable("organization_user", {
   updatedBy: userProfile("_updated_by"),
 }, (table) => [
   index("idx_org_user_org").using("btree", table.orgId.asc().nullsLast().op("uuid_ops")),
-  index("idx_org_user_org_user").using("btree", table.orgId.asc().nullsLast().op("uuid_ops"), table.userId.asc().nullsLast().op("text_ops")),
+  uniqueIndex("idx_org_user_org_user").using("btree", table.orgId.asc().nullsLast().op("uuid_ops"), table.userId.asc().nullsLast().op("text_ops")),
   index("idx_org_user_user").using("btree", table.userId.asc().nullsLast().op("text_ops")),
   foreignKey({
     columns: [table.orgId],
@@ -885,6 +890,7 @@ export const organizationInvite = pgTable("organization_invite", {
   orgId: uuid("org_id").notNull(),
   inviteCode: varchar("invite_code", { length: 255 }).notNull(),
   role: varchar({ length: 255 }).default('member'),
+  businessRole: varchar("business_role", { length: 50 }).default('operator').notNull(),
   maxUses: integer("max_uses").default(1),
   usedCount: integer("used_count").default(0),
   expiresAt: customTimestamptz('expires_at'),
@@ -895,7 +901,7 @@ export const organizationInvite = pgTable("organization_invite", {
   // System field: Updater (auto-filled, do not modify)
   updatedBy: userProfile("_updated_by"),
 }, (table) => [
-  index("idx_org_invite_code").using("btree", table.inviteCode.asc().nullsLast().op("text_ops")),
+  uniqueIndex("idx_org_invite_code").using("btree", table.inviteCode.asc().nullsLast().op("text_ops")),
   index("idx_org_invite_org").using("btree", table.orgId.asc().nullsLast().op("uuid_ops")),
   foreignKey({
     columns: [table.orgId],
@@ -906,6 +912,29 @@ export const organizationInvite = pgTable("organization_invite", {
   pgPolicy("修改全部数据", { as: "permissive", for: "all", to: ["authenticated_workspace_aadjpstn2w2ds"] }),
   pgPolicy("查看全部数据", { as: "permissive", for: "select", to: ["anon_workspace_aadjpstn2w2ds", "authenticated_workspace_aadjpstn2w2ds"] }),
   pgPolicy("修改本人数据", { as: "permissive", for: "all", to: ["authenticated_workspace_aadjpstn2w2ds"] }),
+]);
+
+/**
+ * Transactional outbox for external integrations.
+ * Each tenant database owns its own queue, so payloads and retry state can never
+ * cross organization boundaries.
+ */
+export const integrationSyncJob = pgTable("integration_sync_job", {
+  id: uuid().defaultRandom().notNull(),
+  topic: varchar({ length: 50 }).notNull(),
+  aggregateKey: varchar("aggregate_key", { length: 255 }).notNull(),
+  payload: jsonb().notNull(),
+  status: varchar({ length: 30 }).default('pending').notNull(),
+  attemptCount: integer("attempt_count").default(0).notNull(),
+  nextAttemptAt: customTimestamptz('next_attempt_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
+  lockedAt: customTimestamptz('locked_at'),
+  completedAt: customTimestamptz('completed_at'),
+  lastError: text("last_error"),
+  createdAt: customTimestamptz('_created_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
+  updatedAt: customTimestamptz('_updated_at').default(sql`CURRENT_TIMESTAMP`).notNull(),
+}, (table) => [
+  uniqueIndex("idx_integration_sync_job_topic_key").on(table.topic, table.aggregateKey),
+  index("idx_integration_sync_job_due").on(table.status, table.nextAttemptAt),
 ]);
 
 export const rolePermission = pgTable("role_permission", {
@@ -947,6 +976,7 @@ export const authSessionTable = authSession;
 export const customerTable = customer;
 export const inboundDetailTable = inboundDetail;
 export const inboundOrderTable = inboundOrder;
+export const integrationSyncJobTable = integrationSyncJob;
 export const inventoryRecordTable = inventoryRecord;
 export const operationLogTable = operationLog;
 export const organizationTable = organization;

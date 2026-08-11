@@ -34,9 +34,12 @@ import {
   Settings,
   Copy,
   Check,
+  Trash2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { axiosForBackend } from '@lark-apaas/client-toolkit/utils/getAxiosForBackend';
+import { useTenant } from '@/contexts/TenantContext';
+import { getCurrentUser } from '@/lib/auth-session';
 
 interface Organization {
   id: string;
@@ -56,8 +59,26 @@ interface Organization {
   createdAt: string;
 }
 
+interface OrganizationMember {
+  id: string;
+  userId: string;
+  username: string;
+  name: string;
+  department?: string | null;
+  accountStatus: 'active' | 'inactive';
+  role: 'super_admin' | 'admin' | 'member';
+  businessRole: 'admin' | 'operator' | 'finance' | 'viewer';
+  joinedAt: string;
+}
+
 export default function OrganizationManagePage() {
+  const { currentTenant } = useTenant();
+  const cachedUser = getCurrentUser();
+  const isPlatformAdmin = cachedUser?.accountRoleId === '1';
   const [organizations, setOrganizations] = useState<Organization[]>([]);
+  const [members, setMembers] = useState<OrganizationMember[]>([]);
+  const [memberLoading, setMemberLoading] = useState(false);
+  const [inviteBusinessRole, setInviteBusinessRole] = useState<'operator' | 'finance' | 'viewer'>('operator');
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -73,8 +94,23 @@ export default function OrganizationManagePage() {
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
-    fetchOrganizations();
-  }, []);
+    if (isPlatformAdmin) fetchOrganizations();
+    else fetchMembers();
+  }, [isPlatformAdmin, currentTenant?.orgId]);
+
+  const fetchMembers = async () => {
+    if (!currentTenant?.orgId) return;
+    try {
+      setMemberLoading(true);
+      const response = await axiosForBackend.get(`/api/tenant/organizations/${currentTenant.orgId}/members`);
+      setMembers(response.data.items || []);
+    } catch (error: any) {
+      setMembers([]);
+      toast.error(error.response?.data?.message || '获取组织成员失败');
+    } finally {
+      setMemberLoading(false);
+    }
+  };
 
   const fetchOrganizations = async () => {
     try {
@@ -121,10 +157,11 @@ export default function OrganizationManagePage() {
     }
   };
 
-  const handleCreateInviteCode = async (orgId: string) => {
+  const handleCreateInviteCode = async (orgId: string, businessRole: string = 'operator') => {
     try {
       const response = await axiosForBackend.post(`/api/tenant/organizations/${orgId}/invite-codes`, {
         role: 'member',
+        businessRole,
         maxUses: 1,
         expiresDays: 7,
       });
@@ -132,6 +169,31 @@ export default function OrganizationManagePage() {
       setInviteDialogOpen(true);
     } catch (error: any) {
       toast.error(error.response?.data?.message || '创建邀请码失败');
+    }
+  };
+
+  const updateMember = async (
+    member: OrganizationMember,
+    changes: Partial<Pick<OrganizationMember, 'role' | 'businessRole'>>,
+  ) => {
+    if (!currentTenant?.orgId) return;
+    try {
+      await axiosForBackend.put(`/api/tenant/organizations/${currentTenant.orgId}/members/${member.userId}`, changes);
+      toast.success('成员权限已更新');
+      await fetchMembers();
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || '更新成员权限失败');
+    }
+  };
+
+  const removeMember = async (member: OrganizationMember) => {
+    if (!currentTenant?.orgId || !window.confirm(`确定将 ${member.name} 移出当前组织吗？`)) return;
+    try {
+      await axiosForBackend.delete(`/api/tenant/organizations/${currentTenant.orgId}/members/${member.userId}`);
+      toast.success('成员已移出');
+      await fetchMembers();
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || '移出成员失败');
     }
   };
 
@@ -150,6 +212,77 @@ export default function OrganizationManagePage() {
     };
     return map[status] || { label: status, className: 'bg-gray-100 text-gray-800' };
   };
+
+  if (!isPlatformAdmin) {
+    return (
+      <div className="p-4 md:p-6 space-y-6 max-w-7xl mx-auto">
+        <div>
+          <h1 className="text-2xl font-bold">组织与成员</h1>
+          <p className="text-muted-foreground">管理 {currentTenant?.orgName || '当前组织'} 的成员和租户内业务角色</p>
+        </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>邀请新成员</CardTitle>
+            <CardDescription>新成员先在登录页注册，再使用邀请码加入；邀请码7天内可使用1次。</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col sm:flex-row gap-3">
+            <Select value={inviteBusinessRole} onValueChange={value => setInviteBusinessRole(value as typeof inviteBusinessRole)}>
+              <SelectTrigger className="sm:w-48"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="operator">操作员</SelectItem>
+                <SelectItem value="finance">财务人员</SelectItem>
+                <SelectItem value="viewer">只读用户</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button onClick={() => currentTenant?.orgId && handleCreateInviteCode(currentTenant.orgId, inviteBusinessRole)}>
+              <Plus className="w-4 h-4 mr-2" />生成邀请码
+            </Button>
+            <Button variant="outline" onClick={fetchMembers} disabled={memberLoading}>
+              <RefreshCw className={`w-4 h-4 ${memberLoading ? 'animate-spin' : ''}`} />
+              <span className="sr-only">刷新成员</span>
+            </Button>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader><CardTitle>成员列表</CardTitle><CardDescription>组织管理角色和业务角色分开，不会影响该账号加入的其他组织。</CardDescription></CardHeader>
+          <CardContent>
+            <div className="border rounded-lg overflow-x-auto">
+              <Table>
+                <TableHeader><TableRow><TableHead>成员</TableHead><TableHead>组织角色</TableHead><TableHead>业务角色</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {memberLoading ? <TableRow><TableCell colSpan={4} className="text-center py-8"><Loader2 className="w-6 h-6 animate-spin mx-auto" /></TableCell></TableRow>
+                    : members.length === 0 ? <TableRow><TableCell colSpan={4} className="text-center py-8 text-muted-foreground">暂无成员</TableCell></TableRow>
+                      : members.map(member => (
+                        <TableRow key={member.id}>
+                          <TableCell><div className="font-medium">{member.name}</div><div className="text-xs text-muted-foreground">{member.username}{member.department ? ` · ${member.department}` : ''}</div></TableCell>
+                          <TableCell>
+                            <Select value={member.role} onValueChange={role => updateMember(member, { role: role as OrganizationMember['role'] })}>
+                              <SelectTrigger className="w-36"><SelectValue /></SelectTrigger>
+                              <SelectContent><SelectItem value="super_admin">超级管理员</SelectItem><SelectItem value="admin">管理员</SelectItem><SelectItem value="member">成员</SelectItem></SelectContent>
+                            </Select>
+                          </TableCell>
+                          <TableCell>
+                            <Select disabled={member.role !== 'member'} value={member.role === 'member' ? member.businessRole : 'admin'} onValueChange={businessRole => updateMember(member, { businessRole: businessRole as OrganizationMember['businessRole'] })}>
+                              <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                              <SelectContent><SelectItem value="admin">管理员</SelectItem><SelectItem value="operator">操作员</SelectItem><SelectItem value="finance">财务</SelectItem><SelectItem value="viewer">只读</SelectItem></SelectContent>
+                            </Select>
+                          </TableCell>
+                          <TableCell className="text-right"><Button variant="ghost" size="icon" className="text-destructive" onClick={() => removeMember(member)} title="移出组织"><Trash2 className="w-4 h-4" /></Button></TableCell>
+                        </TableRow>
+                      ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+        <Dialog open={inviteDialogOpen} onOpenChange={setInviteDialogOpen}>
+          <DialogContent><DialogHeader><DialogTitle>邀请码已生成</DialogTitle><DialogDescription>请将邀请码私下发送给已注册成员</DialogDescription></DialogHeader>
+            <div className="flex items-center gap-2 py-4"><code className="flex-1 bg-muted px-4 py-3 rounded-lg text-lg tracking-wider">{inviteCode}</code><Button variant="outline" size="icon" onClick={copyInviteCode}>{copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}</Button></div>
+          </DialogContent>
+        </Dialog>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6">

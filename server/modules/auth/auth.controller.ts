@@ -13,6 +13,12 @@ export class AuthController {
     return this.auth.login(body.username, body.password, body.deviceName);
   }
 
+  @Public()
+  @Post('register')
+  register(@Body() body: { username: string; password: string; name: string }) {
+    return this.auth.register(body);
+  }
+
   @Post('logout')
   logout(@Req() req: Request) {
     return this.auth.logout(req.userContext!.tokenId!);
@@ -51,8 +57,8 @@ export class AuthController {
 
   @CanRole('system:permission')
   @Get('users')
-  users() {
-    return this.auth.listUsers();
+  users(@Req() req: Request) {
+    return this.auth.listUsers(req.userContext!.userId!);
   }
 
   @CanRole('system:permission')
@@ -64,8 +70,8 @@ export class AuthController {
     role: string;
     department?: string;
     deviceLimit?: number;
-  }) {
-    return this.auth.createUser(body);
+  }, @Req() req: Request) {
+    return this.auth.createUser(body, req.userContext!.userId!);
   }
 
   @CanRole('system:permission')
@@ -82,7 +88,7 @@ export class AuthController {
 
   @CanRole('system:permission')
   @Put('users/:id/password')
-  resetPassword(@Param('id') id: string, @Body('password') password: string) {
-    return this.auth.resetPassword(id, password);
+  resetPassword(@Param('id') id: string, @Body('password') password: string, @Req() req: Request) {
+    return this.auth.resetPassword(id, password, req.userContext!.userId!);
   }
 }

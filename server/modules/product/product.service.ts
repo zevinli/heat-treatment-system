@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Inject, Logger, BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { eq, like, and, sql, inArray, isNull } from 'drizzle-orm';
 import {
   type PostgresJsDatabase,
@@ -11,6 +11,7 @@ import {
   outboundDetailTable,
   productCustomerTable,
   productBatchTable,
+  customerTable,
 } from '../../database/schema';
 import { yuanToCents } from '../../common/utils/currency';
 import { PAGINATION } from '../../config/constants';
@@ -190,15 +191,36 @@ export class ProductService {
     warningThreshold?: number;
     attachments?: string[];
   }) {
+    const code = data.code?.trim();
+    const name = data.name?.trim();
+    const customerCode = data.customerCode?.trim();
+    if (!code || !/^[A-Za-z0-9_-]{1,80}$/.test(code)) throw new BadRequestException('产品编号需为1-80位字母、数字、横线或下划线');
+    if (!name || name.length > 150) throw new BadRequestException('产品名称不能为空且不能超过150个字符');
+    if (!customerCode) throw new BadRequestException('必须选择所属客户');
+    if (data.status && !['complete', 'incomplete', 'archived'].includes(data.status)) throw new BadRequestException('无效产品状态');
+    if (data.unit && !['件', 'kg'].includes(data.unit)) throw new BadRequestException('计价单位只能为“件”或“kg”');
+    if (data.unitPrice !== undefined && (!Number.isFinite(Number(data.unitPrice)) || Number(data.unitPrice) < 0)) {
+      throw new BadRequestException('单价必须为非负数');
+    }
+    if (data.warningThreshold !== undefined && (!Number.isInteger(Number(data.warningThreshold)) || Number(data.warningThreshold) < 0)) {
+      throw new BadRequestException('预警阈值必须为非负整数');
+    }
+    const [ownerCustomer] = await this.db.select({ id: customerTable.id, name: customerTable.name })
+      .from(customerTable).where(and(eq(customerTable.code, customerCode), isNull(customerTable.deletedAt))).limit(1);
+    if (!ownerCustomer) throw new BadRequestException('所属客户不存在或已删除');
+    const requestedCustomerIds = Array.from(new Set([ownerCustomer.id, ...(data.customerIds || [])]));
+    const validCustomers = await this.db.select({ id: customerTable.id }).from(customerTable)
+      .where(and(inArray(customerTable.id, requestedCustomerIds), isNull(customerTable.deletedAt)));
+    if (validCustomers.length !== requestedCustomerIds.length) throw new BadRequestException('关联客户中包含不存在或已删除的客户');
     // 检查编码是否已存在（包含已删除的）
-    const existing = await this.findByCode(data.code, true);
+    const existing = await this.findByCode(code, true);
     if (existing && !existing.deletedAt) {
-      throw new BadRequestException(`产品编码 ${data.code} 已存在`);
+      throw new ConflictException(`产品编码 ${code} 已存在`);
     }
     
     // 如果存在已删除的产品，恢复它
     if (existing?.deletedAt) {
-      throw new BadRequestException(`产品编码 ${data.code} 曾被删除，请使用其他编码或联系管理员恢复`);
+      throw new BadRequestException(`产品编码 ${code} 曾被删除，请使用其他编码或联系管理员恢复`);
     }
 
     // 计算金额转分
@@ -217,20 +239,20 @@ export class ProductService {
       }
     }
 
-    const result = await this.db
-      .insert(productTable)
-      .values({
-        code: data.code,
-        name: data.name,
-        material: data.material || null,
-        process: data.process || null,
-        techRequirement: data.techRequirement || null,
-        workpieceNo: data.workpieceNo || null,
+    try {
+      return await this.db.transaction(async (tx) => {
+      const [created] = await tx.insert(productTable).values({
+        code,
+        name,
+        material: data.material?.trim() || null,
+        process: data.process?.trim() || null,
+        techRequirement: data.techRequirement?.trim() || null,
+        workpieceNo: data.workpieceNo?.trim() || null,
         unit: data.unit || '件',
         unitPrice: data.unitPrice || 0,
         unitPriceCents: unitPriceCents,
-        customerCode: data.customerCode,
-        customerName: data.customerName,
+        customerCode,
+        customerName: ownerCustomer.name,
         status: data.status || 'complete',
         stock: 0,
         stockWeight: 0,
@@ -239,29 +261,26 @@ export class ProductService {
         warningThreshold,
         attachments: data.attachments || [],
         version: 1,
-      })
-      .returning();
-
-    const product = result[0];
-
-    // 如果指定了关联客户列表，创建关联关系
-    if (data.customerIds && data.customerIds.length > 0) {
-      await this.linkCustomers(product.id, data.customerIds);
+      }).returning();
+      await this.linkCustomers(created.id, requestedCustomerIds, tx);
+      return created;
+      });
+    } catch (error: any) {
+      if (error?.code === '23505') throw new ConflictException(`产品编码 ${code} 已存在`);
+      throw error;
     }
-
-    return product;
   }
 
   // 关联产品与客户
-  async linkCustomers(productId: string, customerIds: string[]) {
+  async linkCustomers(productId: string, customerIds: string[], database: any = this.db) {
     // 先删除现有非活跃关联
-    await this.db
+    await database
       .delete(productCustomerTable)
       .where(eq(productCustomerTable.productId, productId));
     
     // 创建新的关联
     if (customerIds.length > 0) {
-      await this.db.insert(productCustomerTable).values(
+      await database.insert(productCustomerTable).values(
         customerIds.map(customerId => ({
           productId,
           customerId,
@@ -286,23 +305,42 @@ export class ProductService {
       customerName?: string;
       customerIds?: string[]; // 新增：更新关联客户
       status?: string;
-      stock?: number;
-      inboundQuantity?: number;
-      inboundWeight?: number;
       warningThreshold?: number;
       attachments?: string[];
     },
   ) {
-    // 如果更新了单价，同时更新unitPriceCents
-    const updateData: any = { ...data };
-    delete updateData.customerIds; // 客户关联单独处理
+    const existing = await this.findById(id);
+    if (!existing) throw new NotFoundException('产品不存在或已删除');
+    if (data.name !== undefined && !data.name.trim()) throw new BadRequestException('产品名称不能为空');
+    if (data.unit && !['件', 'kg'].includes(data.unit)) throw new BadRequestException('计价单位只能为“件”或“kg”');
+    if (data.unitPrice !== undefined && (!Number.isFinite(Number(data.unitPrice)) || Number(data.unitPrice) < 0)) {
+      throw new BadRequestException('单价必须为非负数');
+    }
+    if (data.warningThreshold !== undefined && (!Number.isInteger(Number(data.warningThreshold)) || Number(data.warningThreshold) < 0)) {
+      throw new BadRequestException('预警阈值必须为非负整数');
+    }
+    if (data.status && !['complete', 'incomplete', 'archived'].includes(data.status)) throw new BadRequestException('无效产品状态');
+
+    // 显式白名单，禁止通过产品编辑接口直接篡改库存及累计入库数据。
+    const updateData: any = {
+      ...(data.name !== undefined ? { name: data.name.trim() } : {}),
+      ...(data.material !== undefined ? { material: data.material.trim() || null } : {}),
+      ...(data.process !== undefined ? { process: data.process.trim() || null } : {}),
+      ...(data.techRequirement !== undefined ? { techRequirement: data.techRequirement.trim() || null } : {}),
+      ...(data.workpieceNo !== undefined ? { workpieceNo: data.workpieceNo.trim() || null } : {}),
+      ...(data.unit !== undefined ? { unit: data.unit } : {}),
+      ...(data.unitPrice !== undefined ? { unitPrice: Number(data.unitPrice) } : {}),
+      ...(data.status !== undefined ? { status: data.status } : {}),
+      ...(data.warningThreshold !== undefined ? { warningThreshold: Number(data.warningThreshold) } : {}),
+      ...(data.attachments !== undefined ? { attachments: data.attachments } : {}),
+      updatedAt: new Date(),
+    };
     
     if (data.unitPrice !== undefined) {
       updateData.unitPriceCents = yuanToCents(data.unitPrice);
     }
 
     // 自动状态流转
-    const existing = await this.findById(id);
     if (existing && existing.status === 'incomplete') {
       const name = data.name ?? existing.name;
       const material = data.material ?? existing.material;
@@ -314,18 +352,35 @@ export class ProductService {
       }
     }
 
-    const result = await this.db
-      .update(productTable)
-      .set(updateData)
-      .where(eq(productTable.id, id))
-      .returning();
-    
-    // 更新客户关联
-    if (data.customerIds !== undefined) {
-      await this.linkCustomers(id, data.customerIds);
+    if (data.customerCode !== undefined && data.customerCode !== existing.customerCode) {
+      if ((existing.stock || 0) > 0 || (existing.stockWeight || 0) > 0 || (existing.inboundQuantity || 0) > 0) {
+        throw new BadRequestException('已有库存或历史入库的产品不能变更所属客户');
+      }
+      const [nextCustomer] = await this.db.select({ id: customerTable.id, name: customerTable.name })
+        .from(customerTable).where(and(eq(customerTable.code, data.customerCode.trim()), isNull(customerTable.deletedAt))).limit(1);
+      if (!nextCustomer) throw new BadRequestException('目标客户不存在或已删除');
+      updateData.customerCode = data.customerCode.trim();
+      updateData.customerName = nextCustomer.name;
     }
-    
-    return result[0] || null;
+
+    let linkedCustomerIds: string[] | undefined;
+    if (data.customerIds !== undefined) {
+      const ownerCode = updateData.customerCode || existing.customerCode;
+      const [owner] = await this.db.select({ id: customerTable.id }).from(customerTable)
+        .where(and(eq(customerTable.code, ownerCode), isNull(customerTable.deletedAt))).limit(1);
+      if (!owner) throw new BadRequestException('所属客户不存在或已删除');
+      linkedCustomerIds = Array.from(new Set([owner.id, ...data.customerIds]));
+      const valid = await this.db.select({ id: customerTable.id }).from(customerTable)
+        .where(and(inArray(customerTable.id, linkedCustomerIds), isNull(customerTable.deletedAt)));
+      if (valid.length !== linkedCustomerIds.length) throw new BadRequestException('关联客户中包含不存在或已删除的客户');
+    }
+
+    return this.db.transaction(async (tx) => {
+      const [updated] = await tx.update(productTable).set(updateData).where(eq(productTable.id, id)).returning();
+      if (!updated) throw new NotFoundException('产品不存在');
+      if (linkedCustomerIds) await this.linkCustomers(id, linkedCustomerIds, tx);
+      return updated;
+    });
   }
 
   // 批量更新产品预警阈值
@@ -497,7 +552,7 @@ export class ProductService {
       .set({
         deletedAt: null,
 
-        status: 'active',
+        status: 'complete',
       })
       .where(eq(productTable.id, id))
       .returning();

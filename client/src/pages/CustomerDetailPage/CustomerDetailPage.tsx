@@ -36,6 +36,7 @@ import { toast } from 'sonner';
 import { getCustomerById, updateCustomer, getProducts, getCustomerActivity } from '@/api';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Customer } from '@shared/api.interface';
+import { useTenant } from '@/contexts/TenantContext';
 
 // 交易记录类型
 interface ITransaction {
@@ -71,6 +72,7 @@ const CustomerDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { currentTenant } = useTenant();
   const [activeTab, setActiveTab] = useState('transactions');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [formData, setFormData] = useState<ICustomerFormData>({
@@ -88,24 +90,24 @@ const CustomerDetailPage: React.FC = () => {
 
   // 查询客户详情
   const { data: customer, isLoading, error } = useQuery({
-    queryKey: ['customer', id],
+    queryKey: ['customer', currentTenant?.orgCode, id],
     queryFn: () => getCustomerById(id!),
-    enabled: !!id,
+    enabled: Boolean(id && currentTenant?.orgCode),
   });
 
   // 查询客户关联产品
   const { data: productsData } = useQuery({
-    queryKey: ['products', 'customer', customer?.code],
+    queryKey: ['products', currentTenant?.orgCode, 'customer', customer?.code],
     queryFn: () => getProducts({ customerCode: customer?.code }),
-    enabled: !!customer?.code,
+    enabled: Boolean(customer?.code && currentTenant?.orgCode),
   });
 
   const products = productsData?.items || [];
 
   const { data: activityData } = useQuery({
-    queryKey: ['customer-activity', id],
+    queryKey: ['customer-activity', currentTenant?.orgCode, id],
     queryFn: () => getCustomerActivity(id!),
-    enabled: !!id,
+    enabled: Boolean(id && currentTenant?.orgCode),
   });
 
   // 更新客户 mutation
@@ -114,7 +116,7 @@ const CustomerDetailPage: React.FC = () => {
       updateCustomer(id, data),
     onSuccess: () => {
       toast.success('客户更新成功');
-      queryClient.invalidateQueries({ queryKey: ['customer', id] });
+      queryClient.invalidateQueries({ queryKey: ['customer', currentTenant?.orgCode, id] });
       queryClient.invalidateQueries({ queryKey: ['customers'] });
       setIsEditModalOpen(false);
     },

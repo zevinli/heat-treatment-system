@@ -37,6 +37,7 @@ export class AuthMiddleware implements NestMiddleware {
         userId: payload.sub,
         userName: payload.name,
         userRole: payload.role,
+        accountRole: payload.role,
         permissions: permissionsForRole(payload.role),
         tokenId: payload.jti,
       };

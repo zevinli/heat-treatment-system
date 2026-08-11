@@ -379,8 +379,12 @@ const InboundPage: React.FC = () => {
     if (!files?.length) return;
     const current = inboundDetails.find(detail => detail.id === detailId)?.attachments || [];
     const selected = Array.from(files).slice(0, Math.max(0, 3 - current.length));
-    if (selected.some(file => !file.type.startsWith('image/') || file.size > 2 * 1024 * 1024)) {
-      toast.error('仅支持图片，每张不超过2MB，单个产品最多3张');
+    const supportedImageTypes = new Set([
+      'image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif',
+      'image/bmp', 'image/tiff', 'image/x-icon',
+    ]);
+    if (selected.some(file => !supportedImageTypes.has(file.type.toLowerCase()) || file.size === 0 || file.size > 2 * 1024 * 1024)) {
+      toast.error('仅支持 PNG/JPG/WebP/GIF/BMP/TIFF/ICO 图片，每张不超过2MB，单个产品最多3张');
       return;
     }
     const encoded = await Promise.all(selected.map(file => new Promise<string>((resolve, reject) => {
@@ -731,10 +735,10 @@ const InboundPage: React.FC = () => {
       toast.error('请至少添加一个产品');
       return;
     }
-    // 验证逻辑：计价单位为"件"时必须填写数量；为"kg"时必须填写重量
+    // 数量是批次追踪和库存件数的基础；按 kg 计价时还必须填写重量。
     for (const detail of inboundDetails) {
-      if (detail.unit === '件' && detail.quantity <= 0) {
-        toast.error(`${detail.productName}：计价单位为"件"，必须填写入库数量`);
+      if (detail.quantity <= 0) {
+        toast.error(`${detail.productName}：必须填写大于0的入库数量`);
         return;
       }
       if (detail.unit === 'kg' && detail.weight <= 0) {
@@ -1317,7 +1321,8 @@ const InboundPage: React.FC = () => {
                             size="sm"
                             className="h-6 px-2 text-red-600 hover:text-red-700 hover:bg-red-50"
                             onClick={async () => {
-                              const success = await cancelInboundOrder(order.id, '用户撤销');
+                              if (!window.confirm(`确认撤销入库单 ${order.inboundNo} 吗？库存将同步回滚。`)) return;
+                              const success = await cancelInboundOrder(order.id, '用户主动撤销');
                               if (success) {
                                 // 撤销成功后更新状态为已撤销（置灰显示）
                                 setRecentInboundOrders(prev => 

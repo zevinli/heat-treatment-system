@@ -1,37 +1,48 @@
-import React from "react";
-import { Route, Routes, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import Layout from './components/Layout';
+import React, { lazy, Suspense } from 'react';
+import { Route, Routes, Navigate, useLocation } from 'react-router-dom';
 import NotFound from './pages/NotFound/NotFound';
-import LoginPage from './pages/LoginPage/LoginPage';
-import DashboardPage from './pages/DashboardPage/DashboardPage';
-import InboundPage from './pages/InboundPage/InboundPage';
-import OutboundPage from './pages/OutboundPage/OutboundPage';
-import InventoryPage from './pages/InventoryPage/InventoryPage';
-import ReconciliationPage from './pages/ReconciliationPage/ReconciliationPage';
-import StatisticsPage from './pages/StatisticsPage/StatisticsPage';
-import CustomerAnalysisPage from './pages/StatisticsPage/CustomerAnalysisPage';
-import InventoryAnalysisPage from './pages/StatisticsPage/InventoryAnalysisPage';
-import ProductAnalysisPage from './pages/StatisticsPage/ProductAnalysisPage';
-import FinanceAnalysisPage from './pages/StatisticsPage/FinanceAnalysisPage';
-import CustomerListPage from './pages/CustomerListPage/CustomerListPage';
-import CustomerDetailPage from './pages/CustomerDetailPage/CustomerDetailPage';
-import ProductListPage from './pages/ProductListPage/ProductListPage';
-import ProductDetailPage from './pages/ProductDetailPage/ProductDetailPage';
-import TemplateConfigPage from './pages/TemplateConfigPage/TemplateConfigPage';
-import DisplaySettingsPage from './pages/DisplaySettingsPage/DisplaySettingsPage';
-import PermissionPage from './pages/PermissionPage/PermissionPage';
-import UserManualPage from './pages/UserManualPage/UserManualPage';
-import ProfilePage from './pages/ProfilePage/ProfilePage';
-import OperationLogPage from './pages/OperationLogPage/OperationLogPage';
-import FeatureFlagsPage from './pages/FeatureFlagsPage/FeatureFlagsPage';
-import OrderListPage from './pages/OrderListPage/OrderListPage';
-import AdminDashboard from './pages/AdminDashboard/AdminDashboard';
 import LandingPage from './pages/LandingPage/LandingPage';
-import OrganizationPage from './pages/OrganizationPage/OrganizationPage';
-import OrganizationManagePage from './pages/OrganizationManagePage/OrganizationManagePage';
 import { PermissionGuard } from './components/PermissionGuard';
-import { getCurrentUser } from './pages/PermissionPage/PermissionPage';
+import { getCurrentUser } from './lib/auth-session';
 import { TenantProvider, needsTenantSelection } from './contexts/TenantContext';
+
+const Layout = lazy(() => import('./components/Layout'));
+const LoginPage = lazy(() => import('./pages/LoginPage/LoginPage'));
+const OrganizationPage = lazy(() => import('./pages/OrganizationPage/OrganizationPage'));
+const DashboardPage = lazy(() => import('./pages/DashboardPage/DashboardPage'));
+const InboundPage = lazy(() => import('./pages/InboundPage/InboundPage'));
+const OutboundPage = lazy(() => import('./pages/OutboundPage/OutboundPage'));
+const InventoryPage = lazy(() => import('./pages/InventoryPage/InventoryPage'));
+const ReconciliationPage = lazy(() => import('./pages/ReconciliationPage/ReconciliationPage'));
+const StatisticsPage = lazy(() => import('./pages/StatisticsPage/StatisticsPage'));
+const CustomerAnalysisPage = lazy(() => import('./pages/StatisticsPage/CustomerAnalysisPage'));
+const InventoryAnalysisPage = lazy(() => import('./pages/StatisticsPage/InventoryAnalysisPage'));
+const ProductAnalysisPage = lazy(() => import('./pages/StatisticsPage/ProductAnalysisPage'));
+const FinanceAnalysisPage = lazy(() => import('./pages/StatisticsPage/FinanceAnalysisPage'));
+const CustomerListPage = lazy(() => import('./pages/CustomerListPage/CustomerListPage'));
+const CustomerDetailPage = lazy(() => import('./pages/CustomerDetailPage/CustomerDetailPage'));
+const ProductListPage = lazy(() => import('./pages/ProductListPage/ProductListPage'));
+const ProductDetailPage = lazy(() => import('./pages/ProductDetailPage/ProductDetailPage'));
+const TemplateConfigPage = lazy(() => import('./pages/TemplateConfigPage/TemplateConfigPage'));
+const DisplaySettingsPage = lazy(() => import('./pages/DisplaySettingsPage/DisplaySettingsPage'));
+const PermissionPage = lazy(() => import('./pages/PermissionPage/PermissionPage'));
+const UserManualPage = lazy(() => import('./pages/UserManualPage/UserManualPage'));
+const ProfilePage = lazy(() => import('./pages/ProfilePage/ProfilePage'));
+const OperationLogPage = lazy(() => import('./pages/OperationLogPage/OperationLogPage'));
+const FeatureFlagsPage = lazy(() => import('./pages/FeatureFlagsPage/FeatureFlagsPage'));
+const OrderListPage = lazy(() => import('./pages/OrderListPage/OrderListPage'));
+const AdminDashboard = lazy(() => import('./pages/AdminDashboard/AdminDashboard'));
+const OrganizationManagePage = lazy(() => import('./pages/OrganizationManagePage/OrganizationManagePage'));
+const FeishuSettingsPage = lazy(() => import('./pages/FeishuSettingsPage/FeishuSettingsPage'));
+
+const RouteFallback = () => (
+  <div className="flex min-h-[50vh] items-center justify-center" role="status" aria-live="polite">
+    <div className="flex items-center gap-3 text-muted-foreground">
+      <span className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      <span>页面加载中…</span>
+    </div>
+  </div>
+);
 
 // 登录保护路由
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -66,7 +77,8 @@ const RoutesComponent = () => {
   return (
     
       <TenantProvider>
-        <Routes>
+        <Suspense fallback={<RouteFallback />}>
+          <Routes>
           {/* 公开路由 */}
           <Route index element={<LandingPage />} />
           <Route path="/landing" element={<LandingPage />} />
@@ -226,9 +238,17 @@ const RoutesComponent = () => {
               }
             />
             <Route
-              path="/settings/permissions"
+              path="/settings/feishu"
               element={
                 <PermissionGuard requiredPermission="permissions">
+                  <FeishuSettingsPage />
+                </PermissionGuard>
+              }
+            />
+            <Route
+              path="/settings/permissions"
+              element={
+                <PermissionGuard requiredPermission="permissions" platformOnly>
                   <PermissionPage />
                 </PermissionGuard>
               }
@@ -292,7 +312,8 @@ const RoutesComponent = () => {
           </Route>
 
           <Route path="*" element={<NotFound />} />
-        </Routes>
+          </Routes>
+        </Suspense>
       </TenantProvider>
     
   );

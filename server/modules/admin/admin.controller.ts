@@ -1,7 +1,10 @@
 import { Controller, Get, Query } from '@nestjs/common';
+import { CanRole } from '@lark-apaas/fullstack-nestjs-core';
+import { parsePositiveInt } from '../../common/utils/pagination';
 import { AdminService } from './admin.service';
 
 @Controller('api/admin')
+@CanRole('system:settings')
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}
 
@@ -19,7 +22,7 @@ export class AdminController {
 
   @Get('activities')
   async getRecentActivities(@Query('limit') limit?: string) {
-    return this.adminService.getRecentActivities(limit ? parseInt(limit, 10) : 10);
+    return this.adminService.getRecentActivities(parsePositiveInt(limit, 10, 100));
   }
 
   @Get('alerts')
@@ -31,7 +34,7 @@ export class AdminController {
   async getTrends(
     @Query('days') days?: string,
   ) {
-    return this.adminService.getTrends(days ? parseInt(days, 10) : 7);
+    return this.adminService.getTrends(parsePositiveInt(days, 7, 365));
   }
 
   @Get('backup')

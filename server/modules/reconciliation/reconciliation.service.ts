@@ -1,5 +1,5 @@
 import { Injectable, Inject, Logger, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { BitableSyncService } from '../feishu/bitable-sync.service';
+import { FeishuOutboxService } from '../feishu/feishu-outbox.service';
 import { eq, and, desc, sql, inArray, ne, isNull } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import {
@@ -18,7 +18,6 @@ import {
   customer as customerTable,
 } from '../../database/schema';
 import { centsToYuan, yuanToCents } from '../../common/utils/currency';
-import { getCurrentTenantContext } from '../../common/tenant-context.storage';
 
 // 对账单状态类型
 export type ReconciliationStatus = 'draft' | 'confirmed' | 'audited' | 'invoiced' | 'partial_paid' | 'paid' | 'cancelled' | 'voided';
@@ -29,7 +28,7 @@ export class ReconciliationService {
 
   constructor(
     @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
-    private readonly bitableSyncService?: BitableSyncService,
+    private readonly feishuOutbox: FeishuOutboxService,
   ) {}
 
   // 状态流转规则定义
@@ -50,6 +49,31 @@ export class ReconciliationService {
     if (!allowedTransitions.includes(to)) {
       throw new BadRequestException(`非法的状态流转: ${from} -> ${to}, 允许的目标状态: [${allowedTransitions.join(', ')}]`);
     }
+  }
+
+  private paymentStatus(record: {
+    status?: string | null;
+    finalAmountCents?: number | null;
+    receiptAmountCents?: number | null;
+  }): string {
+    if (record.status === 'cancelled' || record.status === 'voided') return '已取消';
+    const finalAmount = Number(record.finalAmountCents || 0);
+    const received = Number(record.receiptAmountCents || 0);
+    if (finalAmount <= 0 || received >= finalAmount || record.status === 'paid') return '已结清';
+    if (received > 0 || record.status === 'partial_paid') return '部分回款';
+    return '未回款';
+  }
+
+  private async enqueueFeishu(db: any, record: any): Promise<void> {
+    await this.feishuOutbox.enqueue(db, 'reconciliation', record.id, {
+      reconciliationNo: record.reconciliationNo,
+      date: record.month,
+      customerName: record.customerName,
+      outboundAmount: Number(record.totalAmount || 0),
+      invoicedAmount: Number(record.invoiceAmount || 0),
+      receivedAmount: Number(record.receiptAmount || 0),
+      paymentStatus: this.paymentStatus(record),
+    });
   }
 
   // 获取所有对账单
@@ -84,13 +108,15 @@ export class ReconciliationService {
     const query = conditions.length > 0
       ? this.db.select().from(reconciliationTable).where(and(...conditions))
       : this.db.select().from(reconciliationTable);
-
-    const results = await query
-      .orderBy(desc(reconciliationTable.createdAt))
-      .limit(pageSize)
-      .offset(offset);
-
-    return results;
+    const countQuery = conditions.length > 0
+      ? this.db.select({ count: sql<number>`count(*)::int` }).from(reconciliationTable).where(and(...conditions))
+      : this.db.select({ count: sql<number>`count(*)::int` }).from(reconciliationTable);
+    const [items, [count]] = await Promise.all([
+      query.orderBy(desc(reconciliationTable.createdAt)).limit(pageSize).offset(offset),
+      countQuery,
+    ]);
+    const total = Number(count?.count || 0);
+    return { items, total, page, pageSize, hasMore: offset + items.length < total };
   }
 
   // 根据ID获取对账单
@@ -118,6 +144,47 @@ export class ReconciliationService {
     return {
       ...reconciliation,
       details,
+    };
+  }
+
+  /** 返回服务端权威的操作前置条件，避免前端缓存状态过期后误导用户。 */
+  async checkAction(id: string, action: 'delete' | 'unaudit') {
+    const [record] = await this.db.select().from(reconciliationTable)
+      .where(eq(reconciliationTable.id, id)).limit(1);
+    if (!record) throw new NotFoundException('对账单不存在');
+    const invoiceCount = Array.isArray(record.invoiceRecords) ? record.invoiceRecords.length : (record.invoiceAmountCents > 0 ? 1 : 0);
+    const receiptCount = Array.isArray(record.receiptRecords) ? record.receiptRecords.length : (record.receiptAmountCents > 0 ? 1 : 0);
+    if (action === 'delete') {
+      if (!['draft', 'confirmed', 'voided'].includes(record.status)) {
+        return { allowed: false, reason: `当前状态[${record.status}]不允许删除，仅草稿、已确认和已作废状态可删除`, invoiceCount, receiptCount };
+      }
+    } else if (action === 'unaudit') {
+      if (record.status !== 'audited') {
+        return { allowed: false, reason: `当前状态[${record.status}]不允许反审核，仅已审核状态可反审核`, invoiceCount, receiptCount };
+      }
+    } else {
+      throw new BadRequestException('不支持的操作类型');
+    }
+    if (record.invoiceAmountCents > 0 || record.receiptAmountCents > 0) {
+      return { allowed: false, reason: '已有开票或回款记录，不能执行该操作', invoiceCount, receiptCount };
+    }
+    return { allowed: true, invoiceCount, receiptCount };
+  }
+
+  async getCalculation(id: string) {
+    const [record] = await this.db.select().from(reconciliationTable)
+      .where(eq(reconciliationTable.id, id)).limit(1);
+    if (!record) throw new NotFoundException('对账单不存在');
+    return {
+      baseAmount: centsToYuan(record.totalAmountCents),
+      deductionAmount: centsToYuan(record.deductionAmountCents),
+      otherAmount: centsToYuan(record.otherAmountCents),
+      compensationAmount: centsToYuan(record.compensationAmountCents),
+      finalAmount: centsToYuan(record.finalAmountCents),
+      invoiceAmount: centsToYuan(record.invoiceAmountCents),
+      uninvoiceAmount: centsToYuan(Math.max(0, record.finalAmountCents - record.invoiceAmountCents)),
+      receiptAmount: centsToYuan(record.receiptAmountCents),
+      unreceivedAmount: centsToYuan(Math.max(0, record.finalAmountCents - record.receiptAmountCents)),
     };
   }
 
@@ -247,13 +314,9 @@ export class ReconciliationService {
         )).returning({ id: outboundOrderTable.id });
         if (!locked) throw new BadRequestException(`出库单 ${order.outboundNo} 已被其他对账单占用`);
       }
+      await this.enqueueFeishu(tx, created);
       return created;
     });
-
-    this.syncToFeishuReconciliation(reconciliation, month, {
-      ...data,
-      customerName: customerRecord.name,
-    }).catch(err => this.logger.warn(`飞书同步对账失败：${err.message}`));
 
     this.logger.log(`对账单创建: ${reconciliation.reconciliationNo}`);
     return this.findById(reconciliation.id);
@@ -311,12 +374,21 @@ export class ReconciliationService {
     updateData.finalAmountCents = yuanToCents(finalAmount);
     updateData.uninvoiceAmount = Math.max(0, finalAmount - existing.invoiceAmount);
     updateData.unreceivedAmount = Math.max(0, finalAmount - existing.receiptAmount);
+    updateData.version = existing.version + 1;
 
-    const [updated] = await this.db
-      .update(reconciliationTable)
-      .set(updateData)
-      .where(eq(reconciliationTable.id, id))
-      .returning();
+    const updated = await this.db.transaction(async (tx) => {
+      const [record] = await tx
+        .update(reconciliationTable)
+        .set(updateData)
+        .where(and(
+          eq(reconciliationTable.id, id),
+          eq(reconciliationTable.version, existing.version),
+        ))
+        .returning();
+      if (!record) throw new BadRequestException('对账单已被其他操作修改，请刷新后重试');
+      await this.enqueueFeishu(tx, record);
+      return record;
+    });
 
     this.logger.log(`对账单更新: ${existing.reconciliationNo}`);
     return this.findById(updated.id);
@@ -339,42 +411,38 @@ export class ReconciliationService {
     // 检查出库单变更（如果是重新审核）
     const outboundChanges = await this.checkOutboundChanges(id);
 
-    // 获取当前最大版本号
-    const maxVersion = await this.getMaxVersion(id);
-    const newVersion = maxVersion + 1;
+    const updated = await this.db.transaction(async (tx) => {
+      // 对账单行锁保证“重建明细→重算金额→重新锁单→审核”不能被并发确认/删除打断。
+      const [current] = await tx.select().from(reconciliationTable)
+        .where(eq(reconciliationTable.id, id)).for('update');
+      if (!current) throw new NotFoundException('对账单不存在');
+      if (current.status !== 'confirmed') throw new BadRequestException('对账单状态已变化，请刷新后重试');
 
-    // 如果有失效的明细（即之前反审核过），重新生成新版本明细
-    const inactiveDetails = await this.db
-      .select()
-      .from(reconciliationDetail)
-      .where(
-        and(
+      const [{ maxVersion }] = await tx
+        .select({ maxVersion: sql<number>`COALESCE(MAX(${reconciliationDetail.version}), 0)::int` })
+        .from(reconciliationDetail)
+        .where(eq(reconciliationDetail.reconciliationId, id));
+      const newVersion = Number(maxVersion || 0) + 1;
+      const [inactiveDetail] = await tx.select({ id: reconciliationDetail.id })
+        .from(reconciliationDetail)
+        .where(and(
           eq(reconciliationDetail.reconciliationId, id),
-          eq(reconciliationDetail.isActive, false)
-        )
-      );
+          eq(reconciliationDetail.isActive, false),
+        )).limit(1);
 
-    if (inactiveDetails.length > 0) {
-      // 获取当前关联的出库单（排除已撤销的单据）
-      const outboundOrders = await this.db
-        .select()
-        .from(outboundOrderTable)
-        .where(
-          and(
-            eq(outboundOrderTable.reconciliationId, id),
-            eq(outboundOrderTable.status, 'pending_reconciliation')
-          )
-        );
+      let amountUpdates: Record<string, unknown> = {};
+      if (inactiveDetail) {
+        const outboundOrders = await tx.select().from(outboundOrderTable).where(and(
+          eq(outboundOrderTable.reconciliationId, id),
+          eq(outboundOrderTable.status, 'pending_reconciliation'),
+        ));
+        if (outboundOrders.length === 0) throw new BadRequestException('该对账单没有可重新审核的出库单');
 
-      // 重新生成明细（新版本）- 只包含未撤销的出库单
-      for (const order of outboundOrders) {
-        const details = await this.db
-          .select()
-          .from(outboundDetailTable)
-          .where(eq(outboundDetailTable.outboundId, order.id));
-
-        for (const detail of details) {
-          await this.db.insert(reconciliationDetail).values({
+        for (const order of outboundOrders) {
+          const details = await tx.select().from(outboundDetailTable)
+            .where(eq(outboundDetailTable.outboundId, order.id));
+          if (details.length === 0) throw new BadRequestException(`出库单 ${order.outboundNo} 没有明细`);
+          await tx.insert(reconciliationDetail).values(details.map(detail => ({
             reconciliationId: id,
             outboundNo: order.outboundNo,
             outboundDate: order.outboundDate,
@@ -389,50 +457,58 @@ export class ReconciliationService {
             unit: detail.unit,
             version: newVersion,
             isActive: true,
-          });
+          })));
         }
+
+        const newTotalAmountCents = outboundOrders.reduce(
+          (sum, order) => sum + yuanToCents(Number(order.totalAmount || 0)),
+          0,
+        );
+        const finalAmountCents = newTotalAmountCents
+          - Number(current.deductionAmountCents || 0)
+          + Number(current.otherAmountCents || 0)
+          + Number(current.compensationAmountCents || 0);
+        if (finalAmountCents < 0) throw new BadRequestException('最终对账金额不能为负数');
+        amountUpdates = {
+          totalAmount: centsToYuan(newTotalAmountCents),
+          totalAmountCents: newTotalAmountCents,
+          finalAmount: centsToYuan(finalAmountCents),
+          finalAmountCents,
+          uninvoiceAmount: centsToYuan(Math.max(0, finalAmountCents - Number(current.invoiceAmountCents || 0))),
+          unreceivedAmount: centsToYuan(Math.max(0, finalAmountCents - Number(current.receiptAmountCents || 0))),
+          version: newVersion,
+        };
+
+        const relocked = await tx.update(outboundOrderTable).set({
+          status: 'reconciled',
+          lockStatus: 'locked',
+          lockedAt: new Date(),
+        }).where(and(
+          eq(outboundOrderTable.reconciliationId, id),
+          eq(outboundOrderTable.status, 'pending_reconciliation'),
+          eq(outboundOrderTable.lockStatus, 'unlocked'),
+        )).returning({ id: outboundOrderTable.id });
+        if (relocked.length !== outboundOrders.length) throw new BadRequestException('部分出库单状态已变化，请刷新后重试');
       }
 
-      // 重新计算对账单总金额（排除已撤销的出库单后）
-      const newTotalAmount = outboundOrders.reduce(
-        (sum, order) => sum + (order.totalAmount || 0),
-        0
-      );
-      const newTotalAmountCents = Math.round(newTotalAmount * 100);
-
-      // 更新对账单金额
-      await this.db
+      const [record] = await tx
         .update(reconciliationTable)
         .set({
-          totalAmount: newTotalAmount,
-          totalAmountCents: newTotalAmountCents,
-          finalAmount: newTotalAmount - (existing.deductionAmount || 0) + (existing.otherAmount || 0) + (existing.compensationAmount || 0),
-          finalAmountCents: yuanToCents(newTotalAmount - (existing.deductionAmount || 0) + (existing.otherAmount || 0) + (existing.compensationAmount || 0)),
-          uninvoiceAmount: Math.max(0, newTotalAmount - (existing.deductionAmount || 0) + (existing.otherAmount || 0) + (existing.compensationAmount || 0) - (existing.invoiceAmount || 0)),
-          unreceivedAmount: Math.max(0, newTotalAmount - (existing.deductionAmount || 0) + (existing.otherAmount || 0) + (existing.compensationAmount || 0) - (existing.receiptAmount || 0)),
-          version: newVersion,
+          ...amountUpdates,
+          status: 'audited',
+          isLocked: true,
+          auditor,
+          auditedAt: new Date(),
         })
-        .where(eq(reconciliationTable.id, id));
-
-      await this.db.update(outboundOrderTable).set({
-        status: 'reconciled',
-        lockStatus: 'locked',
-        lockedAt: new Date(),
-      }).where(and(
-        eq(outboundOrderTable.reconciliationId, id),
-        eq(outboundOrderTable.status, 'pending_reconciliation'),
-      ));
-    }
-
-    const [updated] = await this.db
-      .update(reconciliationTable)
-      .set({
-        status: 'audited',
-        auditor,
-        auditedAt: new Date(),
-      })
-      .where(eq(reconciliationTable.id, id))
-      .returning();
+        .where(and(
+          eq(reconciliationTable.id, id),
+          eq(reconciliationTable.status, 'confirmed'),
+        ))
+        .returning();
+      if (!record) throw new BadRequestException('对账单状态已变化，请刷新后重试');
+      await this.enqueueFeishu(tx, record);
+      return record;
+    });
 
     this.logger.log(`对账单审核: ${existing.reconciliationNo}, 审核人: ${auditor}`);
 
@@ -530,7 +606,6 @@ export class ReconciliationService {
     if (!existing) {
       throw new NotFoundException('对账单不存在');
     }
-
     if (!Number.isFinite(amount) || amount <= 0) throw new BadRequestException('开票金额必须大于0');
     if (!['audited', 'invoiced', 'partial_paid', 'paid'].includes(existing.status)) {
       throw new BadRequestException('对账单审核后才可登记开票');
@@ -550,23 +625,27 @@ export class ReconciliationService {
       date: new Date().toISOString(),
     });
 
-    const [updated] = await this.db
-      .update(reconciliationTable)
-      .set({
-        invoiceAmountCents: newInvoiceAmountCents,
-        invoiceAmount: centsToYuan(newInvoiceAmountCents),
-        uninvoiceAmount: centsToYuan(existing.finalAmountCents - newInvoiceAmountCents),
-        invoiceRecords,
-        status: existing.status === 'audited' && newInvoiceAmountCents >= existing.finalAmountCents
-          ? 'invoiced'
-          : existing.status,
-      })
-      .where(and(
-        eq(reconciliationTable.id, id),
-        eq(reconciliationTable.invoiceAmountCents, existing.invoiceAmountCents),
-      ))
-      .returning();
-    if (!updated) throw new BadRequestException('开票金额已被其他操作更新，请刷新后重试');
+    const updated = await this.db.transaction(async (tx) => {
+      const [record] = await tx
+        .update(reconciliationTable)
+        .set({
+          invoiceAmountCents: newInvoiceAmountCents,
+          invoiceAmount: centsToYuan(newInvoiceAmountCents),
+          uninvoiceAmount: centsToYuan(existing.finalAmountCents - newInvoiceAmountCents),
+          invoiceRecords,
+          status: existing.status === 'audited' && newInvoiceAmountCents >= existing.finalAmountCents
+            ? 'invoiced'
+            : existing.status,
+        })
+        .where(and(
+          eq(reconciliationTable.id, id),
+          eq(reconciliationTable.invoiceAmountCents, existing.invoiceAmountCents),
+        ))
+        .returning();
+      if (!record) throw new BadRequestException('开票金额已被其他操作更新，请刷新后重试');
+      await this.enqueueFeishu(tx, record);
+      return record;
+    });
 
     this.logger.log(`对账单开票: ${existing.reconciliationNo}, 金额: ${amount}`);
     return this.findById(updated.id);
@@ -601,21 +680,25 @@ export class ReconciliationService {
     const isFullyPaid = newReceiptAmountCents >= existing.finalAmountCents;
     const isPartialPaid = newReceiptAmountCents > 0 && newReceiptAmountCents < existing.finalAmountCents;
 
-    const [updated] = await this.db
-      .update(reconciliationTable)
-      .set({
-        receiptAmountCents: newReceiptAmountCents,
-        receiptAmount: centsToYuan(newReceiptAmountCents),
-        unreceivedAmount: centsToYuan(existing.finalAmountCents - newReceiptAmountCents),
-        receiptRecords,
-        status: isFullyPaid ? 'paid' : isPartialPaid ? 'partial_paid' : existing.status,
-      })
-      .where(and(
-        eq(reconciliationTable.id, id),
-        eq(reconciliationTable.receiptAmountCents, existing.receiptAmountCents),
-      ))
-      .returning();
-    if (!updated) throw new BadRequestException('回款金额已被其他操作更新，请刷新后重试');
+    const updated = await this.db.transaction(async (tx) => {
+      const [record] = await tx
+        .update(reconciliationTable)
+        .set({
+          receiptAmountCents: newReceiptAmountCents,
+          receiptAmount: centsToYuan(newReceiptAmountCents),
+          unreceivedAmount: centsToYuan(existing.finalAmountCents - newReceiptAmountCents),
+          receiptRecords,
+          status: isFullyPaid ? 'paid' : isPartialPaid ? 'partial_paid' : existing.status,
+        })
+        .where(and(
+          eq(reconciliationTable.id, id),
+          eq(reconciliationTable.receiptAmountCents, existing.receiptAmountCents),
+        ))
+        .returning();
+      if (!record) throw new BadRequestException('回款金额已被其他操作更新，请刷新后重试');
+      await this.enqueueFeishu(tx, record);
+      return record;
+    });
 
     this.logger.log(`对账单回款: ${existing.reconciliationNo}, 金额: ${amount}`);
     return this.findById(updated.id);
@@ -628,12 +711,29 @@ export class ReconciliationService {
       throw new NotFoundException('对账单不存在');
     }
 
-    // 只有audited及以上状态需要申请
-    if (!['audited', 'invoiced', 'partial_paid'].includes(existing.status)) {
-      // draft和confirmed状态可以直接取消
+    if (existing.status === 'cancelled' || existing.status === 'voided') {
+      throw new BadRequestException('对账单已取消或作废');
+    }
+    if (existing.invoiceAmountCents > 0 || existing.receiptAmountCents > 0) {
+      throw new BadRequestException('已有开票或回款记录，须先完成财务冲销后才能取消');
+    }
+    if (['draft', 'confirmed'].includes(existing.status)) {
       await this.executeCancel(id);
       return { success: true, message: '对账单已直接取消' };
     }
+    if (existing.status !== 'audited') {
+      throw new BadRequestException(`当前状态[${existing.status}]不允许取消`);
+    }
+    if (!reason?.trim()) throw new BadRequestException('请输入取消原因');
+    const [pendingRequest] = await this.db.select({ id: approvalRequestTable.id })
+      .from(approvalRequestTable)
+      .where(and(
+        eq(approvalRequestTable.entityType, 'reconciliation'),
+        eq(approvalRequestTable.entityId, id),
+        eq(approvalRequestTable.status, 'pending'),
+      ))
+      .limit(1);
+    if (pendingRequest) throw new BadRequestException('该对账单已有待处理的取消申请');
 
     // 创建审批申请
     const [request] = await this.db
@@ -643,7 +743,7 @@ export class ReconciliationService {
         entityType: 'reconciliation',
         entityId: id,
         requester,
-        reason,
+        reason: reason.trim(),
         status: 'pending',
       })
       .returning();
@@ -676,19 +776,24 @@ export class ReconciliationService {
       await this.executeCancel(request.entityId);
 
       // 更新审批状态
-      await this.db
+      const [handled] = await this.db
         .update(approvalRequestTable)
         .set({
           status: 'approved',
           approver,
           approvedAt: new Date(),
         })
-        .where(eq(approvalRequestTable.id, requestId));
+        .where(and(
+          eq(approvalRequestTable.id, requestId),
+          eq(approvalRequestTable.status, 'pending'),
+        ))
+        .returning({ id: approvalRequestTable.id });
+      if (!handled) throw new BadRequestException('审批申请已被其他人员处理');
 
       this.logger.log(`对账单取消申请已批准: ${request.entityId}`);
     } else {
       // 拒绝审批
-      await this.db
+      const [handled] = await this.db
         .update(approvalRequestTable)
         .set({
           status: 'rejected',
@@ -696,7 +801,12 @@ export class ReconciliationService {
           rejectedAt: new Date(),
           rejectReason: rejectReason || '审批拒绝',
         })
-        .where(eq(approvalRequestTable.id, requestId));
+        .where(and(
+          eq(approvalRequestTable.id, requestId),
+          eq(approvalRequestTable.status, 'pending'),
+        ))
+        .returning({ id: approvalRequestTable.id });
+      if (!handled) throw new BadRequestException('审批申请已被其他人员处理');
 
       this.logger.log(`对账单取消申请已拒绝: ${request.entityId}, 原因: ${rejectReason}`);
     }
@@ -712,31 +822,43 @@ export class ReconciliationService {
     if (!existing) {
       throw new NotFoundException('对账单不存在');
     }
+    // 审批状态落库前进程异常时，重试批准操作应能安全收尾。
+    if (existing.status === 'cancelled') return;
+    if (!['draft', 'confirmed', 'audited'].includes(existing.status)) {
+      throw new BadRequestException(`当前状态[${existing.status}]不允许取消`);
+    }
+    if (existing.invoiceAmountCents > 0 || existing.receiptAmountCents > 0) {
+      throw new BadRequestException('已有开票或回款记录，须先完成财务冲销后才能取消');
+    }
 
-    // 解除出库单锁定并恢复状态为待对账
-    await this.db
-      .update(outboundOrderTable)
-      .set({
-        reconciliationId: null,
-        lockStatus: 'unlocked',
-        lockedAt: null,
-        status: 'pending_reconciliation',
-      })
-      .where(eq(outboundOrderTable.reconciliationId, id));
+    await this.db.transaction(async (tx) => {
+      // 解除出库单锁定并恢复状态为待对账
+      await tx
+        .update(outboundOrderTable)
+        .set({
+          reconciliationId: null,
+          lockStatus: 'unlocked',
+          lockedAt: null,
+          status: 'pending_reconciliation',
+        })
+        .where(eq(outboundOrderTable.reconciliationId, id));
 
-    // 删除对账明细
-    await this.db
-      .delete(reconciliationDetail)
-      .where(eq(reconciliationDetail.reconciliationId, id));
+      await tx.delete(reconciliationDetail)
+        .where(eq(reconciliationDetail.reconciliationId, id));
 
-    // 更新对账单状态为取消
-    await this.db
-      .update(reconciliationTable)
-      .set({
-        status: 'cancelled',
-        isLocked: false,
-      })
-      .where(eq(reconciliationTable.id, id));
+      const [cancelled] = await tx
+        .update(reconciliationTable)
+        .set({ status: 'cancelled', isLocked: false })
+        .where(and(
+          eq(reconciliationTable.id, id),
+          eq(reconciliationTable.status, existing.status),
+          eq(reconciliationTable.invoiceAmountCents, 0),
+          eq(reconciliationTable.receiptAmountCents, 0),
+        ))
+        .returning();
+      if (!cancelled) throw new BadRequestException('对账单状态已变化，请刷新后重试');
+      await this.enqueueFeishu(tx, cancelled);
+    });
 
     this.logger.log(`对账单已取消: ${existing.reconciliationNo}`);
   }
@@ -764,96 +886,82 @@ export class ReconciliationService {
       throw new BadRequestException('已有开票记录，无法反审核');
     }
 
-    // 查询当前明细并保存到版本表（用于历史追溯）
-    const currentDetails = await this.db
-      .select()
-      .from(reconciliationDetail)
-      .where(eq(reconciliationDetail.reconciliationId, id));
+    const updated = await this.db.transaction(async (tx) => {
+      const currentDetails = await tx.select().from(reconciliationDetail)
+        .where(eq(reconciliationDetail.reconciliationId, id));
+      const outboundOrders = await tx
+        .select({
+          id: outboundOrderTable.id,
+          outboundNo: outboundOrderTable.outboundNo,
+          totalAmount: outboundOrderTable.totalAmount,
+          totalQuantity: outboundOrderTable.totalQuantity,
+          status: outboundOrderTable.status,
+        })
+        .from(outboundOrderTable)
+        .where(eq(outboundOrderTable.reconciliationId, id));
+      const outboundSnapshot = {
+        snapshotAt: new Date().toISOString(),
+        outboundOrders: outboundOrders.map(order => ({
+          id: order.id,
+          outboundNo: order.outboundNo,
+          totalAmount: order.totalAmount,
+          totalQuantity: order.totalQuantity,
+          status: order.status,
+        })),
+      };
 
-    // 查询关联的出库单信息，用于快照记录
-    const outboundOrders = await this.db
-      .select({
-        id: outboundOrderTable.id,
-        outboundNo: outboundOrderTable.outboundNo,
-        totalAmount: outboundOrderTable.totalAmount,
-        totalQuantity: outboundOrderTable.totalQuantity,
-        status: outboundOrderTable.status,
-      })
-      .from(outboundOrderTable)
-      .where(eq(outboundOrderTable.reconciliationId, id));
-
-    // 构建出库单快照
-    const outboundSnapshot = {
-      snapshotAt: new Date().toISOString(),
-      outboundOrders: outboundOrders.map(o => ({
-        id: o.id,
-        outboundNo: o.outboundNo,
-        totalAmount: o.totalAmount,
-        totalQuantity: o.totalQuantity,
-        status: o.status,
-      })),
-    };
-
-    if (currentDetails.length > 0) {
-      // 软删除：将当前明细标记为失效，并记录原因
-      await this.db
-        .update(reconciliationDetail)
-        .set({
+      if (currentDetails.length > 0) {
+        await tx.update(reconciliationDetail).set({
           isActive: false,
           updateReason: reason || '反审核操作',
           updatedBy: operator,
           updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(reconciliationDetail.reconciliationId, id),
-            eq(reconciliationDetail.isActive, true)
-          )
-        );
-    }
+        }).where(and(
+          eq(reconciliationDetail.reconciliationId, id),
+          eq(reconciliationDetail.isActive, true),
+        ));
+      }
 
-    // 解除出库单业务锁，但保留 reconciliationId 关联，以便重新确认、审核和完整追溯。
-    await this.db
-      .update(outboundOrderTable)
-      .set({
+      await tx.update(outboundOrderTable).set({
         lockStatus: 'unlocked',
         lockedAt: null,
         status: 'pending_reconciliation',
-      })
-      .where(eq(outboundOrderTable.reconciliationId, id));
+      }).where(eq(outboundOrderTable.reconciliationId, id));
 
-    // 更新对账单状态为草稿。
-    const [updated] = await this.db
-      .update(reconciliationTable)
-      .set({
+      const [record] = await tx.update(reconciliationTable).set({
         status: 'draft',
         isLocked: false,
         auditor: null,
         auditedAt: null,
         version: (existing.version || 1) + 1,
-        outboundSnapshot: outboundSnapshot,
-      })
-      .where(eq(reconciliationTable.id, id))
-      .returning();
-
-    // 记录操作日志
-    await this.db.insert(operationLogTable).values({
-      entityType: 'reconciliation',
-      entityId: id,
-      operation: 'unaudit',
-      operator,
-      beforeState: JSON.stringify({
-        status: 'audited',
-        version: existing.version,
-        detailsCount: currentDetails.length,
-      }),
-      afterState: JSON.stringify({
-        status: 'draft',
-        version: (existing.version || 1) + 1,
-        reason: reason || '反审核操作',
         outboundSnapshot,
-      }),
-      source: 'web',
+      }).where(and(
+        eq(reconciliationTable.id, id),
+        eq(reconciliationTable.status, 'audited'),
+        eq(reconciliationTable.invoiceAmountCents, 0),
+      )).returning();
+      if (!record) throw new BadRequestException('对账单状态已变化，请刷新后重试');
+
+      await tx.insert(operationLogTable).values({
+        entityType: 'reconciliation',
+        entityId: id,
+        operation: 'unaudit',
+        operator,
+        beforeState: JSON.stringify({
+          status: 'audited',
+          version: existing.version,
+          detailsCount: currentDetails.length,
+        }),
+        afterState: JSON.stringify({
+          status: 'draft',
+          version: (existing.version || 1) + 1,
+          reason: reason || '反审核操作',
+          outboundSnapshot,
+        }),
+        source: 'web',
+      });
+      await this.enqueueFeishu(tx, record);
+      return record;
     });
 
     this.logger.log(`对账单反审核: ${existing.reconciliationNo}, 操作人: ${operator}, 原因: ${reason}`);
@@ -864,13 +972,16 @@ export class ReconciliationService {
     const existing = await this.findById(id);
     if (!existing) throw new NotFoundException('对账单不存在');
     this.validateStatusTransition(existing.status as ReconciliationStatus, 'confirmed');
-    const [updated] = await this.db.update(reconciliationTable).set({
-      status: 'confirmed',
-    }).where(and(
-      eq(reconciliationTable.id, id),
-      eq(reconciliationTable.status, 'draft'),
-    )).returning();
-    if (!updated) throw new BadRequestException('对账单状态已变化，请刷新后重试');
+    await this.db.transaction(async (tx) => {
+      const [updated] = await tx.update(reconciliationTable).set({
+        status: 'confirmed',
+      }).where(and(
+        eq(reconciliationTable.id, id),
+        eq(reconciliationTable.status, 'draft'),
+      )).returning();
+      if (!updated) throw new BadRequestException('对账单状态已变化，请刷新后重试');
+      await this.enqueueFeishu(tx, updated);
+    });
     return this.findById(id);
   }
 
@@ -979,26 +1090,33 @@ export class ReconciliationService {
       throw new BadRequestException('对账单已有回款记录，无法删除');
     }
 
-    // 解除出库单锁定并恢复状态为待对账
-    await this.db
-      .update(outboundOrderTable)
-      .set({
+    await this.db.transaction(async (tx) => {
+      await tx.update(outboundOrderTable).set({
         reconciliationId: null,
         lockStatus: 'unlocked',
         lockedAt: null,
         status: 'pending_reconciliation',
-      })
-      .where(eq(outboundOrderTable.reconciliationId, id));
-
-    // 删除对账明细
-    await this.db
-      .delete(reconciliationDetail)
-      .where(eq(reconciliationDetail.reconciliationId, id));
-
-    // 删除对账单
-    await this.db
-      .delete(reconciliationTable)
-      .where(eq(reconciliationTable.id, id));
+      }).where(eq(outboundOrderTable.reconciliationId, id));
+      await tx.delete(reconciliationDetail)
+        .where(eq(reconciliationDetail.reconciliationId, id));
+      const [deleted] = await tx.delete(reconciliationTable).where(and(
+        eq(reconciliationTable.id, id),
+        eq(reconciliationTable.status, existing.status),
+        eq(reconciliationTable.invoiceAmountCents, 0),
+        eq(reconciliationTable.receiptAmountCents, 0),
+      )).returning({ id: reconciliationTable.id });
+      if (!deleted) throw new BadRequestException('对账单状态已变化，请刷新后重试');
+      await this.feishuOutbox.enqueue(tx, 'reconciliation', existing.id, {
+        reconciliationNo: existing.reconciliationNo,
+        date: existing.month,
+        customerName: existing.customerName,
+        outboundAmount: 0,
+        invoicedAmount: 0,
+        receivedAmount: 0,
+        paymentStatus: '已删除',
+        deleted: true,
+      });
+    });
 
     this.logger.log(`对账单已删除: ${existing.reconciliationNo}`);
     return { success: true };
@@ -1036,18 +1154,4 @@ export class ReconciliationService {
     };
   }
 
-  private async syncToFeishuReconciliation(reconciliation: any, month: string, data: any) {
-    if (!this.bitableSyncService) return;
-    const paymentStatus = reconciliation.unreceivedAmount === 0 ? '已结清'
-      : reconciliation.receiptAmount > 0 ? '部分回款' : '未回款';
-
-    await this.bitableSyncService.syncReconciliation({
-      date: month,
-      customerName: data.customerName,
-      outboundAmount: reconciliation.totalAmount || 0,
-      invoicedAmount: reconciliation.invoiceAmount || 0,
-      receivedAmount: reconciliation.receiptAmount || 0,
-      paymentStatus,
-    }, getCurrentTenantContext()?.orgCode);
-  }
 }

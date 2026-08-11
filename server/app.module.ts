@@ -21,7 +21,6 @@ import { StatisticsModule } from './modules/statistics/statistics.module';
 import { VoiceModule } from './modules/voice/voice.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { TenantModule } from './modules/tenant/tenant.module';
-import { TenantConnectionService } from './modules/tenant/tenant-connection.service';
 import { AuthMiddleware } from './common/middleware/auth.middleware';
 import { TenantMiddleware } from './common/middleware/tenant.middleware';
 import { AuthModule } from './modules/auth/auth.module';
@@ -55,7 +54,6 @@ import { AuthGuard } from './modules/auth/auth.guard';
     ViewModule,
   ],
   providers: [
-    TenantConnectionService,
     {
       provide: APP_FILTER,
       useClass: GlobalExceptionFilter,

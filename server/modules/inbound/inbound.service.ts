@@ -1,5 +1,5 @@
 import { Injectable, Inject, Logger, BadRequestException, NotFoundException, ConflictException } from '@nestjs/common';
-import { BitableSyncService } from '../feishu/bitable-sync.service';
+import { FeishuOutboxService } from '../feishu/feishu-outbox.service';
 import { eq, and, desc, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import {
@@ -20,11 +20,12 @@ import {
   undoLogTable,
   customer,
   operationLogTable,
+  approvalRequestTable,
 } from '../../database/schema';
 import { yuanToCents } from '../../common/utils/currency';
 import { checkUndoable } from '../../common/utils/undo-check.util';
 import { PAGINATION } from '../../config/constants';
-import { getCurrentTenantContext } from '../../common/tenant-context.storage';
+import { parseRangeEndExclusive, parseRangeStart } from '../../common/utils/date-range';
 
 @Injectable()
 export class InboundService {
@@ -32,7 +33,7 @@ export class InboundService {
 
   constructor(
     @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
-    private readonly bitableSyncService?: BitableSyncService,
+    private readonly feishuOutbox: FeishuOutboxService,
   ) {}
 
   // 获取所有入库单
@@ -58,10 +59,10 @@ export class InboundService {
       conditions.push(eq(inboundOrder.customerId, customerId));
     }
     if (startDate) {
-      conditions.push(sql`${inboundOrder.inboundDate} >= ${new Date(startDate)}`);
+      conditions.push(sql`${inboundOrder.inboundDate} >= ${parseRangeStart(startDate)}`);
     }
     if (endDate) {
-      conditions.push(sql`${inboundOrder.inboundDate} <= ${new Date(endDate)}`);
+      conditions.push(sql`${inboundOrder.inboundDate} < ${parseRangeEndExclusive(endDate)}`);
     }
     if (keyword?.trim()) {
       const searchPattern = `%${keyword.trim()}%`;
@@ -128,30 +129,11 @@ export class InboundService {
     };
   }
 
-  // 生成入库单号：RK + 年月日 + 3位序号
-  private async generateInboundNo(): Promise<string> {
+  // 生成入库单号：日期 + 随机短码，避免多终端并发提交时“当日数量+1”撞号。
+  private generateInboundNo(): string {
     const today = new Date();
     const dateStr = today.toISOString().slice(2, 10).replace(/-/g, ''); // 格式：YYMMDD
-    const prefix = `RK${dateStr}`;
-    
-    // 查询当天已有的入库单数量
-    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
-    
-    const countResult = await this.db
-      .select({ count: sql<number>`count(*)` })
-      .from(inboundOrder)
-      .where(
-        and(
-          sql`${inboundOrder.createdAt} >= ${startOfDay.toISOString()}`,
-          sql`${inboundOrder.createdAt} < ${endOfDay.toISOString()}`
-        )
-      );
-    
-    const sequence = (countResult[0]?.count || 0) + 1;
-    const sequenceStr = sequence.toString().padStart(3, '0');
-    
-    return `${prefix}${sequenceStr}`;
+    return `RK${dateStr}${randomUUID().replace(/-/g, '').slice(0, 6).toUpperCase()}`;
   }
 
   // 创建入库单 - 带批次创建和库存更新
@@ -203,8 +185,8 @@ export class InboundService {
         throw new BadRequestException(`第 ${index + 1} 行金额或单价无效`);
       }
       const attachments = detail.attachments || [];
-      if (attachments.length > 3 || attachments.some(file => !file.startsWith('data:image/') || file.length > 2_800_000)) {
-        throw new BadRequestException(`第 ${index + 1} 行最多上传3张、每张不超过2MB的图片`);
+      if (attachments.length > 3 || attachments.some(file => !this.isValidInboundImage(file))) {
+        throw new BadRequestException(`第 ${index + 1} 行最多上传3张 PNG/JPG/WebP/GIF/BMP/TIFF/ICO 图片，每张不超过2MB`);
       }
       return { ...detail, quantity, weight, unitPrice, amount, attachments };
     });
@@ -256,6 +238,10 @@ export class InboundService {
         amount: Math.round(unitPrice * billingQuantity * 100) / 100,
       };
     }));
+    const productIds = details.map(detail => detail.productId);
+    if (new Set(productIds).size !== productIds.length) {
+      throw new BadRequestException('同一入库单不能重复添加同一产品，请合并数量和重量');
+    }
     const totalAmount = details.reduce((sum, detail) => sum + detail.amount, 0);
     const totalQuantity = details.reduce((sum, detail) => sum + detail.quantity, 0);
     const totalWeight = details.reduce((sum, detail) => sum + detail.weight, 0);
@@ -264,7 +250,7 @@ export class InboundService {
     const totalAmountCents = yuanToCents(totalAmount);
 
     // 自动生成或验证入库单号
-    const inboundNo = data.inboundNo || await this.generateInboundNo();
+    const inboundNo = data.inboundNo || this.generateInboundNo();
     
     if (data.inboundNo) {
       // 如果前端传了单号，检查是否已存在
@@ -412,21 +398,21 @@ export class InboundService {
       }),
       source: 'web',
     });
+    for (const detail of details) {
+      await this.feishuOutbox.enqueue(tx, 'inbound', `${order.id}:${detail.productId}`, {
+        orderId: order.inboundNo,
+        customerName: customerRecord.name,
+        productName: detail.productName,
+        quantity: detail.quantity,
+        weight: detail.weight,
+        createdAt: data.inboundDate,
+        createdBy: data.creator,
+        status: '已入库',
+        attachments: detail.attachments,
+      });
+    }
     return order;
     });
-
-    // 仅在数据库事务成功提交后触发外部同步。
-    this.syncToFeishuInbound(order, {
-      ...data,
-      customerName: customerRecord.name,
-      customerCode: customerRecord.code,
-      details,
-      totalAmount,
-      totalQuantity,
-      totalWeight,
-    }).catch(err =>
-      this.logger.warn(`飞书同步来货登记失败：${err.message}`),
-    );
 
     return this.findById(order.id);
   }
@@ -549,7 +535,7 @@ export class InboundService {
   }
 
   // 检查是否可以撤销
-  async checkCanUndo(id: string) {
+  async checkCanUndo(id: string, operatorId?: string, allowAny = false, approvedOverride = false) {
     const order = await this.findById(id);
     if (!order) {
       return { canUndo: false, reason: '入库单不存在' };
@@ -557,6 +543,9 @@ export class InboundService {
 
     if (order.status === 'cancelled') {
       return { canUndo: false, reason: '入库单已被撤销' };
+    }
+    if (operatorId && !allowAny && order.creator !== operatorId) {
+      return { canUndo: false, reason: '普通操作员只能撤销自己创建的入库单' };
     }
 
     // 检查是否有后续的出库操作
@@ -600,13 +589,13 @@ export class InboundService {
     // 检查是否在允许的时间窗口内（30分钟）或已过审批
     // 修复：使用系统创建时间createdAt，避免用户修改inboundDate导致的误判
     // 如果有已批准的撤销申请，允许超期撤销
-    const approvedUndo = await this.db
-      .select({ id: undoLogTable.id })
-      .from(undoLogTable)
+    const approvedUndo = approvedOverride ? [{ id: 'approval-override' }] : await this.db
+      .select({ id: approvalRequestTable.id })
+      .from(approvalRequestTable)
       .where(and(
-        eq(undoLogTable.entityId, id),
-        eq(undoLogTable.entityType, 'inbound_order'),
-        eq(undoLogTable.status, 'approved')
+        eq(approvalRequestTable.entityId, id),
+        eq(approvalRequestTable.type, 'inbound_undo'),
+        eq(approvalRequestTable.status, 'approved')
       ))
       .limit(1);
 
@@ -627,8 +616,8 @@ export class InboundService {
   }
 
   // 撤销入库单 - 支持超期审批撤销
-  async undo(id: string, operator: string, reason?: string) {
-    const checkResult = await this.checkCanUndo(id);
+  async undo(id: string, operator: string, reason?: string, allowAny = false, approvedOverride = false) {
+    const checkResult = await this.checkCanUndo(id, operator, allowAny, approvedOverride);
     if (!checkResult.canUndo) {
       throw new BadRequestException(checkResult.reason);
     }
@@ -641,14 +630,21 @@ export class InboundService {
     // 开始撤销流程
     await this.db.transaction(async (tx) => {
       // 1. 标记入库单为已撤销
-      await tx
+      const [cancelledOrder] = await tx
         .update(inboundOrderTable)
         .set({
           status: 'cancelled',
           cancelledAt: new Date(),
           cancelReason: reason || '用户撤销',
         })
-        .where(eq(inboundOrderTable.id, id));
+        .where(and(
+          eq(inboundOrderTable.id, id),
+          eq(inboundOrderTable.status, 'active'),
+        ))
+        .returning({ id: inboundOrderTable.id });
+      if (!cancelledOrder) {
+        throw new ConflictException('入库单状态已变化，请刷新后重试');
+      }
 
       // 2. 还原产品库存
       for (const detail of order.details) {
@@ -659,61 +655,86 @@ export class InboundService {
             stockWeight: productTable.stockWeight,
             inboundQuantity: productTable.inboundQuantity,
             inboundWeight: productTable.inboundWeight,
+            version: productTable.version,
           })
           .from(productTable)
-          .where(eq(productTable.id, detail.productId));
+          .where(eq(productTable.id, detail.productId))
+          .for('update');
 
-        if (productRecord) {
-          const newStock = Math.max(0, productRecord.stock - detail.quantity);
-          const newStockWeight = Math.max(0, (productRecord.stockWeight || 0) - detail.weight);
-          const newInboundQty = Math.max(0, productRecord.inboundQuantity - detail.quantity);
-          const newInboundWeight = Math.max(0, (productRecord.inboundWeight || 0) - detail.weight);
+        if (!productRecord) {
+          throw new ConflictException(`产品 ${detail.productName} 已不存在，无法撤销`);
+        }
+        if (
+          productRecord.stock < detail.quantity
+          || (productRecord.stockWeight || 0) < detail.weight
+          || productRecord.inboundQuantity < detail.quantity
+          || (productRecord.inboundWeight || 0) < detail.weight
+        ) {
+          throw new ConflictException(`产品 ${detail.productName} 库存已变化，无法撤销，请刷新后重试`);
+        }
+        const newStock = productRecord.stock - detail.quantity;
+        const newStockWeight = (productRecord.stockWeight || 0) - detail.weight;
+        const newInboundQty = productRecord.inboundQuantity - detail.quantity;
+        const newInboundWeight = (productRecord.inboundWeight || 0) - detail.weight;
 
-          await tx
-            .update(productTable)
-            .set({
-              stock: newStock,
-              stockWeight: newStockWeight,
-              inboundQuantity: newInboundQty,
-              inboundWeight: newInboundWeight,
-            })
-            .where(eq(productTable.id, detail.productId));
+        const [updatedProduct] = await tx
+          .update(productTable)
+          .set({
+            stock: newStock,
+            stockWeight: newStockWeight,
+            inboundQuantity: newInboundQty,
+            inboundWeight: newInboundWeight,
+            version: productRecord.version + 1,
+          })
+          .where(and(
+            eq(productTable.id, detail.productId),
+            eq(productTable.version, productRecord.version),
+          ))
+          .returning({ id: productTable.id });
+        if (!updatedProduct) {
+          throw new ConflictException(`产品 ${detail.productName} 库存已被其他操作修改，请重试`);
         }
 
-        // 3. 删除关联批次库存记录（先删子表）
-        const batches = await tx
-          .select({ id: productBatchTable.id })
-          .from(productBatchTable)
-          .where(eq(productBatchTable.inboundOrderId, id));
-
-        for (const batch of batches) {
-          await tx
-            .delete(productBatchStockTable)
-            .where(eq(productBatchStockTable.batchId, batch.id));
-        }
-
-        // 4. 删除批次记录
-        await tx
-          .delete(productBatchTable)
-          .where(eq(productBatchTable.inboundOrderId, id));
-
-        // 5. 添加反向库存变动记录 - 修复：关联原入库单ID
+        // 3. 添加反向库存变动记录
         await tx.insert(inventoryRecordTable).values({
           productId: detail.productId,
           productName: detail.productName,
           changeType: 'inbound_rollback',
           quantityChange: -detail.quantity,
           weightChange: -detail.weight,
-          beforeStock: productRecord?.stock || 0,
-          afterStock: Math.max(0, (productRecord?.stock || 0) - detail.quantity),
-          beforeStockWeight: productRecord?.stockWeight || 0,
-          afterStockWeight: Math.max(0, (productRecord?.stockWeight || 0) - detail.weight),
+          beforeStock: productRecord.stock,
+          afterStock: newStock,
+          beforeStockWeight: productRecord.stockWeight || 0,
+          afterStockWeight: newStockWeight,
           referenceNo: order.inboundNo,
           operator,
           remark: `入库单撤销：${reason || '无'}`,
           originalInboundId: id, // 修复：关联原入库单ID
         });
+
+        await this.feishuOutbox.enqueue(tx, 'inbound', `${order.id}:${detail.productId}`, {
+          orderId: order.inboundNo,
+          customerName: order.customerName,
+          productName: detail.productName,
+          quantity: detail.quantity,
+          weight: detail.weight,
+          createdAt: order.inboundDate,
+          createdBy: order.creator,
+          status: '已取消',
+        });
       }
+
+      // 4. 所有产品库存都成功扣回后，再统一删除本入库单创建的批次。
+      const batches = await tx
+        .select({ id: productBatchTable.id })
+        .from(productBatchTable)
+        .where(eq(productBatchTable.inboundOrderId, id));
+      for (const batch of batches) {
+        await tx.delete(productBatchStockTable)
+          .where(eq(productBatchStockTable.batchId, batch.id));
+      }
+      await tx.delete(productBatchTable)
+        .where(eq(productBatchTable.inboundOrderId, id));
 
       // 6. 记录撤销日志
       await tx.insert(undoLogTable).values({
@@ -770,54 +791,15 @@ export class InboundService {
   }
 
   // 申请超期撤销审批
-  async requestUndoApproval(id: string, operator: string, reason: string) {
-    const order = await this.findById(id);
-    if (!order) {
-      throw new NotFoundException('入库单不存在');
-    }
-
-    if (order.status === 'cancelled') {
-      throw new BadRequestException('入库单已被撤销');
-    }
-
-    // 检查是否已有待审批的申请
-    const existingApproval = await this.db
-      .select({ id: undoLogTable.id })
-      .from(undoLogTable)
-      .where(and(
-        eq(undoLogTable.entityId, id),
-        eq(undoLogTable.entityType, 'inbound_order'),
-        eq(undoLogTable.status, 'pending_approval')
-      ))
-      .limit(1);
-
-    if (existingApproval.length > 0) {
-      throw new BadRequestException('已存在待审批的撤销申请');
-    }
-
-    // 创建审批记录，使用 status 字段标记审批状态
-    await this.db.insert(undoLogTable).values({
-      entityType: 'inbound_order',
-      entityId: id,
-      operator: operator as any,
-      reason,
-      undoTime: new Date(),
-      originalData: JSON.stringify({ inboundNo: order.inboundNo, customerName: order.customerName }),
-      status: 'pending_approval',
-    });
-
-    return { message: '撤销申请已提交，等待审批' };
-  }
-
   // 获取入库单统计
   async getStats(startDate?: string, endDate?: string) {
     const conditions = [eq(inboundOrder.status, 'active')];
     
     if (startDate) {
-      conditions.push(sql`${inboundOrder.inboundDate} >= ${new Date(startDate)}`);
+      conditions.push(sql`${inboundOrder.inboundDate} >= ${parseRangeStart(startDate)}`);
     }
     if (endDate) {
-      conditions.push(sql`${inboundOrder.inboundDate} <= ${new Date(endDate)}`);
+      conditions.push(sql`${inboundOrder.inboundDate} < ${parseRangeEndExclusive(endDate)}`);
     }
 
     const whereClause = conditions.length > 1 ? and(...conditions) : conditions[0];
@@ -849,20 +831,12 @@ export class InboundService {
     return logs;
   }
 
-  private async syncToFeishuInbound(order: any, data: any) {
-    if (!this.bitableSyncService) return;
-    const orgCode = getCurrentTenantContext()?.orgCode;
-    for (const detail of data.details) {
-      await this.bitableSyncService.syncInbound({
-        orderId: order.inboundNo,
-        customerName: data.customerName,
-        productName: detail.productName,
-        quantity: detail.quantity,
-        weight: detail.weight,
-        createdAt: data.inboundDate,
-        createdBy: data.creator,
-        status: '待处理',
-      }, orgCode);
-    }
+  private isValidInboundImage(value: unknown): value is string {
+    if (typeof value !== 'string' || value.length > 2_800_000) return false;
+    const match = /^data:image\/(?:png|jpe?g|webp|gif|bmp|tiff|x-icon);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(value);
+    if (!match) return false;
+    const bytes = Buffer.from(match[1], 'base64');
+    return bytes.length > 0 && bytes.length <= 2 * 1024 * 1024;
   }
+
 }

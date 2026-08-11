@@ -109,7 +109,10 @@ export interface CreateProductDto {
   unitPrice?: number;
   customerCode: string;
   customerName: string;
+  customerIds?: string[];
   status?: 'complete' | 'incomplete';
+  warningThreshold?: number;
+  attachments?: string[];
 }
 
 export interface UpdateProductDto {
@@ -122,10 +125,8 @@ export interface UpdateProductDto {
   unitPrice?: number;
   customerCode?: string;
   customerName?: string;
-  status?: string;
-  stock?: number;
-  inboundQuantity?: number;
-  inboundWeight?: number;
+  customerIds?: string[];
+  status?: 'complete' | 'incomplete' | 'archived';
   warningThreshold?: number;
   attachments?: string[];
 }

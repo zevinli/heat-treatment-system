@@ -10,10 +10,11 @@ import {
   Req,
   Logger,
 } from '@nestjs/common';
-import { NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
+import { CanRole, NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
 import type { Request } from 'express';
 import { ProductService } from './product.service';
 import { PAGINATION } from '../../config/constants';
+import { parsePagination, parsePositiveInt } from '../../common/utils/pagination';
 
 @Controller('api/products')
 export class ProductController {
@@ -21,8 +22,31 @@ export class ProductController {
 
   constructor(private readonly productService: ProductService) {}
 
+  // 静态子路由必须放在 :id 之前，否则会被当成产品 ID 而永远无法访问。
+  @Get('incomplete')
+  @CanRole('product:view')
+  async getIncompleteProducts(@Query('limit') limit?: string) {
+    return this.productService.findIncompleteProducts(parsePositiveInt(limit, 10, 100));
+  }
+
+  @Get('material-thresholds')
+  @CanRole('product:view')
+  async getMaterialThresholds() {
+    return this.productService.getMaterialThresholds();
+  }
+
+  @NeedLogin()
+  @CanRole('product:update')
+  @Put('material-thresholds')
+  async setMaterialThreshold(
+    @Body() body: { material: string; threshold: number },
+  ) {
+    return this.productService.setMaterialThreshold(body.material, body.threshold);
+  }
+
   // 获取所有产品
   @Get()
+  @CanRole('product:view')
   async findAll(
     @Query('search') search?: string,
     @Query('customerCode') customerCode?: string,
@@ -32,25 +56,29 @@ export class ProductController {
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
+    const pagination = parsePagination(page, pageSize, {
+      page: PAGINATION.DEFAULT_PAGE, pageSize: PAGINATION.DEFAULT_PAGE_SIZE, maxPageSize: PAGINATION.MAX_PAGE_SIZE,
+    });
     return this.productService.findAll({
       search,
       customerCode,
       status,
       material,
       process,
-      page: page ? parseInt(page, 10) : PAGINATION.DEFAULT_PAGE,
-      pageSize: pageSize ? parseInt(pageSize, 10) : PAGINATION.DEFAULT_PAGE_SIZE,
+      ...pagination,
     });
   }
 
   // 根据ID获取产品
   @Get(':id')
+  @CanRole('product:view')
   async findById(@Param('id') id: string) {
     return this.productService.findById(id);
   }
 
   // 创建产品
   @NeedLogin()
+  @CanRole('product:create')
   @Post()
   async create(
     @Body()
@@ -65,7 +93,10 @@ export class ProductController {
       unitPrice?: number;
       customerCode: string;
       customerName: string;
+      customerIds?: string[];
       status?: string;
+      warningThreshold?: number;
+      attachments?: string[];
     },
   ) {
     return this.productService.create(body);
@@ -73,6 +104,7 @@ export class ProductController {
 
   // 更新产品
   @NeedLogin()
+  @CanRole('product:update')
   @Put(':id')
   async update(
     @Param('id') id: string,
@@ -87,10 +119,10 @@ export class ProductController {
       unitPrice?: number;
       customerCode?: string;
       customerName?: string;
+      customerIds?: string[];
       status?: string;
-      stock?: number;
-      inboundQuantity?: number;
-      inboundWeight?: number;
+      warningThreshold?: number;
+      attachments?: string[];
     },
   ) {
     return this.productService.update(id, body);
@@ -98,6 +130,7 @@ export class ProductController {
 
   // 删除产品
   @NeedLogin()
+  @CanRole('product:delete')
   @Delete(':id')
   async delete(@Param('id') id: string, @Req() req: Request) {
     const { userId } = req.userContext;
@@ -106,6 +139,7 @@ export class ProductController {
 
   // 批量删除产品
   @NeedLogin()
+  @CanRole('product:delete')
   @Post('batch-delete')
   async batchDelete(
     @Body() body: { ids: string[] },
@@ -117,6 +151,7 @@ export class ProductController {
 
   // 批量更新产品预警阈值
   @NeedLogin()
+  @CanRole('product:update')
   @Post('batch-update-threshold')
   async batchUpdateThreshold(
     @Body() body: { productIds: string[]; warningThreshold: number },
@@ -124,24 +159,4 @@ export class ProductController {
     return this.productService.batchUpdateThreshold(body.productIds, body.warningThreshold);
   }
 
-  // 获取待完善产品列表
-  @Get('incomplete')
-  async getIncompleteProducts(@Query('limit') limit?: string) {
-    return this.productService.findIncompleteProducts(limit ? parseInt(limit, 10) : 10);
-  }
-
-  // 获取材质默认阈值配置
-  @Get('material-thresholds')
-  async getMaterialThresholds() {
-    return this.productService.getMaterialThresholds();
-  }
-
-  // 设置材质默认阈值
-  @NeedLogin()
-  @Put('material-thresholds')
-  async setMaterialThreshold(
-    @Body() body: { material: string; threshold: number },
-  ) {
-    return this.productService.setMaterialThreshold(body.material, body.threshold);
-  }
 }

@@ -14,6 +14,8 @@ export interface FeishuTenantConfig {
   orgCode: string;
   /** 多维表格 App Token */
   bitableAppToken: string;
+  /** 可直接访问的多维表格基础地址（企业域名或飞书返回 URL） */
+  baseUrl: string;
   /** 是否激活 */
   isActive: boolean;
   /** 各数据表 ID */
@@ -36,32 +38,28 @@ export class FeishuTenantConfigService {
 
   /** 获取指定组织的飞书配置 */
   async getConfig(orgCode: string): Promise<FeishuTenantConfig | null> {
-    try {
-      const rows = await this.db
-        .select({ feishuConfig: organization.feishuConfig, code: organization.code })
-        .from(organization)
-        .where(eq(organization.code, orgCode))
-        .limit(1);
+    const rows = await this.db
+      .select({ feishuConfig: organization.feishuConfig, code: organization.code })
+      .from(organization)
+      .where(eq(organization.code, orgCode))
+      .limit(1);
 
-      if (!rows[0]?.feishuConfig) return null;
+    if (!rows[0]?.feishuConfig) return null;
 
-      const config = rows[0].feishuConfig as any;
-      return {
-        orgCode: rows[0].code,
-        bitableAppToken: config.bitableAppToken || '',
-        isActive: config.isActive ?? false,
-        tableInbound: config.tableInbound || '',
-        tableOutbound: config.tableOutbound || '',
-        tableInventory: config.tableInventory || '',
-        tableCustomer: config.tableCustomer || '',
-        tableReconciliation: config.tableReconciliation || '',
-        tableQuality: config.tableQuality || '',
-        tableProcess: config.tableProcess || '',
-      };
-    } catch (error: any) {
-      this.logger.warn(`读取组织 ${orgCode} 飞书配置失败：${error.message}`);
-      return null;
-    }
+    const config = rows[0].feishuConfig as any;
+    return {
+      orgCode: rows[0].code,
+      bitableAppToken: config.bitableAppToken || '',
+      baseUrl: config.baseUrl || '',
+      isActive: config.isActive ?? false,
+      tableInbound: config.tableInbound || '',
+      tableOutbound: config.tableOutbound || '',
+      tableInventory: config.tableInventory || '',
+      tableCustomer: config.tableCustomer || '',
+      tableReconciliation: config.tableReconciliation || '',
+      tableQuality: config.tableQuality || '',
+      tableProcess: config.tableProcess || '',
+    };
   }
 
   /** 获取所有已激活飞书的组织配置 */
@@ -79,6 +77,7 @@ export class FeishuTenantConfigService {
           configs.push({
             orgCode: row.code,
             bitableAppToken: cfg.bitableAppToken,
+            baseUrl: cfg.baseUrl || '',
             isActive: true,
             tableInbound: cfg.tableInbound || '',
             tableOutbound: cfg.tableOutbound || '',
@@ -100,11 +99,25 @@ export class FeishuTenantConfigService {
   /** 保存或更新组织的飞书配置 */
   async saveConfig(orgCode: string, config: Partial<Omit<FeishuTenantConfig, 'orgCode'>>): Promise<void> {
     const existing = await this.getConfig(orgCode);
-    const merged = {
-      ...(existing || {}),
-      ...config,
+    const text = (value: unknown, fallback = '') => typeof value === 'string' ? value.trim() : fallback;
+    const merged: Omit<FeishuTenantConfig, 'orgCode'> = {
+      bitableAppToken: text(config.bitableAppToken, existing?.bitableAppToken),
+      baseUrl: text(config.baseUrl, existing?.baseUrl),
       isActive: config.isActive ?? existing?.isActive ?? false,
+      tableInbound: text(config.tableInbound, existing?.tableInbound),
+      tableOutbound: text(config.tableOutbound, existing?.tableOutbound),
+      tableInventory: text(config.tableInventory, existing?.tableInventory),
+      tableCustomer: text(config.tableCustomer, existing?.tableCustomer),
+      tableReconciliation: text(config.tableReconciliation, existing?.tableReconciliation),
+      tableQuality: text(config.tableQuality, existing?.tableQuality),
+      tableProcess: text(config.tableProcess, existing?.tableProcess),
     };
+    if (merged.baseUrl && !/^https:\/\//i.test(merged.baseUrl)) throw new BadRequestException('飞书访问地址必须使用 https://');
+    const identifiers = [merged.bitableAppToken, merged.tableInbound, merged.tableOutbound, merged.tableInventory,
+      merged.tableCustomer, merged.tableReconciliation, merged.tableQuality, merged.tableProcess].filter(Boolean);
+    if (identifiers.some(value => !/^[A-Za-z0-9_-]{3,255}$/.test(value))) {
+      throw new BadRequestException('App Token 或数据表 ID 格式不正确');
+    }
     if (merged.isActive && (!merged.bitableAppToken || !merged.tableInbound || !merged.tableOutbound || !merged.tableInventory || !merged.tableCustomer || !merged.tableReconciliation)) {
       throw new BadRequestException('启用飞书同步前必须填写 App Token 和五个业务表 ID');
     }

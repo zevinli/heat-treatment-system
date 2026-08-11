@@ -44,6 +44,7 @@ import {
 import { useData } from '@/data/DataContext';
 import { cn } from '@/lib/utils';
 import { getChangeTypeConfig, isStockIncrease } from '@shared/inventory-change-types';
+import { useAppPermission } from '@/hooks/useAppPermission';
 
 // KPI卡片组件
 interface KPICardProps {
@@ -69,8 +70,8 @@ const KPICard: React.FC<KPICardProps> = ({
 }) => (
   <Card 
     className={cn(
-      "group relative overflow-hidden cursor-pointer transition-all duration-300",
-      "hover:shadow-lg hover:-translate-y-0.5 border-border/50",
+      "group relative overflow-hidden transition-all duration-300 border-border/50",
+      onClick && "cursor-pointer hover:shadow-lg hover:-translate-y-0.5",
       "bg-gradient-to-br from-card to-card/95"
     )}
     style={{ animationDelay: `${delay}ms` }}
@@ -548,6 +549,8 @@ const BusinessCompletionCard: React.FC<BusinessCompletionCardProps> = ({
 
 const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
+  const canCreateInbound = useAppPermission('inbound:create');
+  const canCreateOutbound = useAppPermission('outbound:create');
   const currentProfile = useCurrentUserProfile();
   const [currentDate, setCurrentDate] = useState<string>('');
   const [messageDialogOpen, setMessageDialogOpen] = useState(false);
@@ -613,10 +616,12 @@ const DashboardPage: React.FC = () => {
 
     const currentMonth = new Date().toISOString().slice(0, 7);
     const monthlyReceiptAmount = reconciliations
-      .filter(r => r.month === currentMonth && r.status === 'paid')
+      .filter(r => r.month === currentMonth && ['partial_paid', 'paid'].includes(r.status))
       .reduce((sum, r) => sum + r.receiptAmount, 0);
 
-    const unreceivedAmount = reconciliations.reduce((sum, r) => sum + r.unreceivedAmount, 0);
+    const unreceivedAmount = reconciliations
+      .filter(r => ['audited', 'invoiced', 'partial_paid'].includes(r.status))
+      .reduce((sum, r) => sum + Math.max(0, r.unreceivedAmount), 0);
 
     const monthlyStats = {
       inbound: inventoryRecords.filter(r =>
@@ -648,8 +653,8 @@ const DashboardPage: React.FC = () => {
       severity: 'high' | 'medium' | 'low';
     }> = [];
     
-    const overdueReconciliations = reconciliations.filter(r => 
-      r.unreceivedAmount > 0 && r.status !== 'draft'
+    const overdueReconciliations = reconciliations.filter(r =>
+      r.unreceivedAmount > 0 && ['audited', 'invoiced', 'partial_paid'].includes(r.status)
     );
     
     overdueReconciliations.slice(0, 3).forEach((r, i) => {
@@ -790,13 +795,12 @@ const DashboardPage: React.FC = () => {
       {/* KPI卡片区域 */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <KPICard
-          title="本月入库数量"
+          title="本月入库明细"
           value={kpiData.monthlyStats.inbound}
-          description={`出库 ${kpiData.monthlyStats.outbound} 件`}
-          trend={{ value: 12, isPositive: true }}
+          description={`本月出库明细 ${kpiData.monthlyStats.outbound} 条`}
           icon={<Inbox className="w-5 h-5 text-white" />}
           iconBg="bg-gradient-to-br from-blue-500 to-blue-600"
-          onClick={() => navigate('/inbound')}
+          onClick={() => navigate(canCreateInbound ? '/inbound' : '/orders')}
           delay={0}
         />
         <KPICard
@@ -811,7 +815,6 @@ const DashboardPage: React.FC = () => {
         <KPICard
           title="本月回款金额"
           value={`¥${(kpiData.monthlyReceiptAmount / 10000).toFixed(1)}万`}
-          trend={{ value: 8, isPositive: true }}
           icon={<Wallet className="w-5 h-5 text-white" />}
           iconBg="bg-gradient-to-br from-emerald-500 to-emerald-600"
           delay={200}
@@ -860,22 +863,22 @@ const DashboardPage: React.FC = () => {
             </CardHeader>
             <CardContent className="pt-0">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <QuickAction
+                {canCreateInbound && <QuickAction
                   icon={<Upload className="w-6 h-6 text-white" />}
                   label="来货登记"
                   description="现场收货录入，打印流程卡"
                   color="bg-gradient-to-br from-blue-500 to-blue-600 shadow-blue-500/25"
                   onClick={() => navigate('/inbound')}
                   delay={0}
-                />
-                <QuickAction
+                />}
+                {canCreateOutbound && <QuickAction
                   icon={<Truck className="w-6 h-6 text-white" />}
                   label="快速发货"
                   description="智能分批发货，打印送货单"
                   color="bg-gradient-to-br from-emerald-500 to-emerald-600 shadow-emerald-500/25"
                   onClick={() => navigate('/outbound')}
                   delay={100}
-                />
+                />}
                 <QuickAction
                   icon={<BarChart3 className="w-6 h-6 text-white" />}
                   label="数据统计"

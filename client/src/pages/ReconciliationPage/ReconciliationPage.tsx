@@ -16,6 +16,9 @@ import { ICustomer } from '@/data/mockData';
 import { exportToExcel, getReconciliationExportColumns } from '@/utils/excelExport';
 import { getReconciliationHistory } from '@/api';
 import { smartPrint, exportElementToPdf } from '@/lib/print-service';
+import { usePermissions } from '@/hooks/usePermission';
+import { axiosForBackend } from '@lark-apaas/client-toolkit/utils/getAxiosForBackend';
+import { getCurrentUser } from '@/lib/auth-session';
 import {
   Filter,
   FilterContent,
@@ -67,6 +70,12 @@ const formatMoney = (amount: number, options?: { showUnit?: boolean; decimals?: 
   return showUnit ? `¥${formatted}${unit}` : formatted;
 };
 
+const formatDate = (value?: string): string => {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('zh-CN');
+};
+
 // 金额显示组件
 const MoneyDisplay: React.FC<{
   amount: number;
@@ -94,6 +103,12 @@ const MoneyDisplay: React.FC<{
 };
 
 const ReconciliationPage: React.FC = () => {
+  const { permissions, roles } = usePermissions();
+  const isAdmin = roles.includes('admin') || permissions.includes('*' as any);
+  const canCreate = isAdmin || permissions.includes('reconciliation:create');
+  const canAudit = isAdmin || permissions.includes('reconciliation:audit');
+  const canUnaudit = isAdmin || permissions.includes('reconciliation:unaudit');
+  const canUndoOutbound = isAdmin || permissions.includes('outbound:undo');
   const {
     customers,
     outboundOrders,
@@ -111,6 +126,8 @@ const ReconciliationPage: React.FC = () => {
     cancelOutboundOrder,
     refreshReconciliations,
     refreshOutboundOrders,
+    checkReconciliationAction,
+    getReconciliationCalculation,
   } = useData();
 
   // 防御性处理：在 useData 解构后添加
@@ -253,6 +270,28 @@ const ReconciliationPage: React.FC = () => {
 
   // 获取待对账的出库单
   const [pendingOrders, setPendingOrders] = useState<IOutboundOrder[]>([]);
+  const [memberNames, setMemberNames] = useState<Record<string, string>>(() => {
+    const currentUser = getCurrentUser();
+    return currentUser ? { [currentUser.id]: currentUser.name } : {};
+  });
+
+  useEffect(() => {
+    const orgId = localStorage.getItem('currentOrgId');
+    if (!orgId) return;
+    let active = true;
+    axiosForBackend.get(`/api/tenant/organizations/${encodeURIComponent(orgId)}/member-directory`)
+      .then(response => {
+        if (!active) return;
+        const items = Array.isArray(response.data?.items) ? response.data.items : [];
+        setMemberNames(previous => ({ ...previous, ...Object.fromEntries(items
+          .filter((item: any) => typeof item?.userId === 'string' && typeof item?.name === 'string')
+          .map((item: any) => [item.userId, item.name])) }));
+      })
+      .catch(() => {
+        // 姓名目录只改善展示，不应阻断核心对账流程。
+      });
+    return () => { active = false; };
+  }, []);
   
   useEffect(() => {
     if (selectedCustomerId) {
@@ -299,6 +338,20 @@ const ReconciliationPage: React.FC = () => {
     setSelectedCustomer(customer);
     setSelectedCustomerId(customer.id);
     setAddStep(2);
+  };
+
+  const startReconciliationForOrder = (order: IOutboundOrder) => {
+    const customer = customers.find(item => item.id === order.customerId);
+    if (!customer) {
+      toast.error('该出库单关联的客户不存在或已停用');
+      return;
+    }
+    setSelectedCustomer(customer);
+    setSelectedCustomerId(customer.id);
+    setSelectedOutboundIds([order.id]);
+    setSelectedMonth(order.outboundDate.slice(0, 7));
+    setAddStep(2);
+    setAddDialogOpen(true);
   };
 
   // 返回客户选择
@@ -403,66 +456,19 @@ const ReconciliationPage: React.FC = () => {
   };
 
   // 编辑对账单
-  const handleEditReconciliation = () => {
+  const handleEditReconciliation = async () => {
     if (!selectedReconciliation) return;
-
-    updateReconciliation(selectedReconciliation.id, {
-      deductionAmount,
-      otherAmount,
-      compensationAmount,
-      finalAmount: selectedReconciliation.totalAmount - deductionAmount + otherAmount + compensationAmount,
-      unreceivedAmount: selectedReconciliation.totalAmount - deductionAmount + otherAmount + compensationAmount - selectedReconciliation.receiptAmount,
-    });
-
-    toast.success('对账单更新成功');
-    setEditDialogOpen(false);
-    setSelectedReconciliation(null);
-  };
-
-  // 检查对账单是否可以删除
-  const checkDeleteAllowed = (reconciliation: IReconciliation) => {
-    // 只有 draft、confirmed 和 voided 状态可以删除
-    if (!['draft', 'confirmed', 'voided'].includes(reconciliation.status)) {
-      return {
-        allowed: false,
-        reason: `当前状态[${reconciliation.status}]不允许删除，仅草稿、已确认和已作废状态可删除`,
-      };
+    try {
+      await updateReconciliation(selectedReconciliation.id, {
+        deductionAmount,
+        otherAmount,
+        compensationAmount,
+      });
+      setEditDialogOpen(false);
+      setSelectedReconciliation(null);
+    } catch {
+      // DataContext 已显示后端返回的具体错误，保留弹窗让用户修正。
     }
-
-    const hasInvoices = reconciliation.invoiceAmount > 0;
-    const hasReceipts = reconciliation.receiptAmount > 0;
-
-    if (hasInvoices || hasReceipts) {
-      return {
-        allowed: false,
-        reason: `该对账单已有${hasInvoices ? '开票记录' : ''}${hasInvoices && hasReceipts ? '和' : ''}${hasReceipts ? '回款记录' : ''}，不能删除`,
-        invoiceCount: hasInvoices ? 1 : 0,
-        receiptCount: hasReceipts ? 1 : 0,
-      };
-    }
-
-    return { allowed: true };
-  };
-
-  // 检查对账单是否可以反审核
-  const checkUnauditAllowed = (reconciliation: IReconciliation) => {
-    // 只有已审核状态才能反审核
-    if (reconciliation.status !== 'audited') {
-      return {
-        allowed: false,
-        reason: `当前状态为"${statusMap[reconciliation.status]?.label || reconciliation.status}"，仅已审核状态可以反审核`,
-      };
-    }
-
-    // 已有开票或回款记录不能反审核
-    if (reconciliation.invoiceAmount > 0 || reconciliation.receiptAmount > 0) {
-      return {
-        allowed: false,
-        reason: '已有开票或回款记录的对账单不能反审核',
-      };
-    }
-
-    return { allowed: true };
   };
 
   // 检查对账单是否可以审核
@@ -482,7 +488,7 @@ const ReconciliationPage: React.FC = () => {
     if (!selectedReconciliation) return;
 
     // 操作前校验
-    const checkResult = checkDeleteAllowed(selectedReconciliation);
+    const checkResult = await checkReconciliationAction(selectedReconciliation.id, 'delete');
     if (!checkResult.allowed) {
       setActionCheckType('delete');
       setActionCheckResult(checkResult);
@@ -491,15 +497,8 @@ const ReconciliationPage: React.FC = () => {
       return;
     }
 
-    // 从对账单明细中提取出库单号，然后找到对应的出库单ID
-    const outboundNos = selectedReconciliation.details?.map(d => d.outboundNo).filter(Boolean) || [];
-    const relatedOrderIds = outboundOrders
-      .filter(o => outboundNos.includes(o.outboundNo))
-      .map(o => o.id);
-
     try {
-      // 传入关联的出库单ID，删除后回退出库单状态到待对账
-      await deleteReconciliation(selectedReconciliation.id, relatedOrderIds);
+      await deleteReconciliation(selectedReconciliation.id);
       setDeleteDialogOpen(false);
       setSelectedReconciliation(null);
       // 强制刷新对账单列表和出库单列表，确保状态同步
@@ -514,9 +513,15 @@ const ReconciliationPage: React.FC = () => {
   const handleDeleteOutboundOrder = () => {
     if (!selectedOutboundOrder) return;
 
-    cancelOutboundOrder(selectedOutboundOrder.id, '对账页面撤销');
-    setDeleteOutboundDialogOpen(false);
-    setSelectedOutboundOrder(null);
+    void (async () => {
+      try {
+        await cancelOutboundOrder(selectedOutboundOrder.id, '对账页面撤销');
+        setDeleteOutboundDialogOpen(false);
+        setSelectedOutboundOrder(null);
+      } catch {
+        // 保留弹窗和当前单据，方便用户查看失败原因后重试。
+      }
+    })();
   };
 
   // 审核对账单
@@ -552,7 +557,7 @@ const ReconciliationPage: React.FC = () => {
     if (!targetRecord) return;
 
     // 操作前校验
-    const checkResult = checkUnauditAllowed(targetRecord);
+    const checkResult = await checkReconciliationAction(targetRecord.id, 'unaudit');
     if (!checkResult.allowed) {
       setActionCheckType('unaudit');
       setActionCheckResult(checkResult);
@@ -594,19 +599,13 @@ const ReconciliationPage: React.FC = () => {
   };
 
   // 查看金额计算明细
-  const viewCalculationDetail = (reconciliation: IReconciliation) => {
-    setCalculationDetail({
-      baseAmount: reconciliation.totalAmount,
-      deductionAmount: reconciliation.deductionAmount || 0,
-      otherAmount: reconciliation.otherAmount || 0,
-      compensationAmount: reconciliation.compensationAmount || 0,
-      finalAmount: reconciliation.finalAmount,
-      invoiceAmount: reconciliation.invoiceAmount || 0,
-      uninvoiceAmount: reconciliation.uninvoiceAmount || 0,
-      receiptAmount: reconciliation.receiptAmount || 0,
-      unreceivedAmount: reconciliation.unreceivedAmount || 0,
-    });
-    setCalculationDialogOpen(true);
+  const viewCalculationDetail = async (reconciliation: IReconciliation) => {
+    try {
+      setCalculationDetail(await getReconciliationCalculation(reconciliation.id));
+      setCalculationDialogOpen(true);
+    } catch {
+      // DataContext 已提示具体错误。
+    }
   };
 
   // 记录开票
@@ -786,7 +785,7 @@ const ReconciliationPage: React.FC = () => {
             <FileText className="w-4 h-4" />
           </Button>
           {/* 审核按钮：仅已确认状态显示 */}
-          {record.status === 'draft' && (
+          {canCreate && record.status === 'draft' && (
             <Button
               size="sm"
               variant="outline"
@@ -800,7 +799,7 @@ const ReconciliationPage: React.FC = () => {
               确认
             </Button>
           )}
-          {record.status === 'confirmed' && (
+          {canAudit && record.status === 'confirmed' && (
             <Button
               size="sm"
               variant="outline"
@@ -813,7 +812,7 @@ const ReconciliationPage: React.FC = () => {
             </Button>
           )}
           {/* 反审核按钮：仅已审核状态显示 */}
-          {record.status === 'audited' && (
+          {canUnaudit && record.status === 'audited' && (
             <Button
               size="sm"
               variant="outline"
@@ -826,7 +825,7 @@ const ReconciliationPage: React.FC = () => {
             </Button>
           )}
           {/* 删除按钮：草稿、已确认和已作废状态可删除 */}
-          {(record.status === 'draft' || record.status === 'confirmed' || record.status === 'voided') && (
+          {canCreate && (record.status === 'draft' || record.status === 'confirmed' || record.status === 'voided') && (
             <Button
               size="sm"
               variant="ghost"
@@ -838,7 +837,7 @@ const ReconciliationPage: React.FC = () => {
             </Button>
           )}
           {/* 先开票：只要有未开票金额就显示开票按钮 */}
-          {record.uninvoiceAmount > 0 && record.status !== 'draft' && record.status !== 'confirmed' && (
+          {canAudit && record.uninvoiceAmount > 0 && record.status !== 'draft' && record.status !== 'confirmed' && (
             <Button
               size="sm"
               variant="outline"
@@ -849,7 +848,7 @@ const ReconciliationPage: React.FC = () => {
             </Button>
           )}
           {/* 后回款：全开票后才能回款（未开票金额为0且还有未回款金额） */}
-          {record.uninvoiceAmount === 0 && record.unreceivedAmount > 0 && record.status !== 'draft' && record.status !== 'confirmed' && (
+          {canAudit && record.uninvoiceAmount === 0 && record.unreceivedAmount > 0 && record.status !== 'draft' && record.status !== 'confirmed' && (
             <Button
               size="sm"
               variant="outline"
@@ -927,7 +926,7 @@ const ReconciliationPage: React.FC = () => {
               <tr key={index}>
                 <td style={{ border: '1px solid #666', padding: '3px', textAlign: 'center' }}>{index + 1}</td>
                 <td style={{ border: '1px solid #666', padding: '3px' }}>{detail.outboundNo}</td>
-                <td style={{ border: '1px solid #666', padding: '3px', textAlign: 'center' }}>{detail.outboundDate}</td>
+                <td style={{ border: '1px solid #666', padding: '3px', textAlign: 'center' }}>{formatDate(detail.outboundDate)}</td>
                 <td style={{ border: '1px solid #666', padding: '3px' }}>{detail.productName}</td>
                 <td style={{ border: '1px solid #666', padding: '3px', textAlign: 'center' }}>{detail.workpieceNo || '-'}</td>
                 <td style={{ border: '1px solid #666', padding: '3px', textAlign: 'center' }}>{detail.process || '-'}</td>
@@ -1012,10 +1011,7 @@ const ReconciliationPage: React.FC = () => {
                     <Download className="w-4 h-4 mr-1" />
                     Excel导出
                   </Button>
-                  <Button size="sm" className="bg-primary" onClick={() => setAddDialogOpen(true)}>
-                    <Plus className="w-4 h-4 mr-1" />
-                    新增对账单
-                  </Button>
+                  {canCreate && <Button size="sm" className="bg-primary" onClick={() => setAddDialogOpen(true)}><Plus className="w-4 h-4 mr-1" />新增对账单</Button>}
                 </div>
               </div>
             </CardHeader>
@@ -1079,30 +1075,55 @@ const ReconciliationPage: React.FC = () => {
         <TabsContent value="pending" className="space-y-4">
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-lg flex items-center gap-2">
-                <FileText className="w-5 h-5 text-primary" />
-                待对账出库单
-              </CardTitle>
+              <div className="flex items-center justify-between gap-2">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <FileText className="w-5 h-5 text-primary" />
+                  待对账出库单
+                </CardTitle>
+                {canCreate && (
+                  <Button size="sm" onClick={() => setAddDialogOpen(true)}>
+                    <Plus className="w-4 h-4 mr-1" />新增对账单
+                  </Button>
+                )}
+              </div>
             </CardHeader>
             <CardContent>
               <p className="text-sm text-muted-foreground mb-4">
-                以下出库单尚未生成对账单，请选择后点击"新增对账单"进行对账
+                以下出库单尚未生成对账单，可直接点击“生成对账单”，也可使用右上角入口合并多张出库单。
               </p>
               <Table
                 columns={[
                   { title: '出库单号', dataIndex: 'outboundNo', key: 'outboundNo' },
                   { title: '客户', dataIndex: 'customerName', key: 'customerName' },
-                  { title: '出库日期', dataIndex: 'outboundDate', key: 'outboundDate' },
+                  {
+                    title: '出库日期',
+                    dataIndex: 'outboundDate',
+                    key: 'outboundDate',
+                    render: (value: string) => formatDate(value),
+                  },
                   { title: '数量', dataIndex: 'totalQuantity', key: 'totalQuantity' },
                   { title: '金额', dataIndex: 'totalAmount', key: 'totalAmount', render: (v: number) => v.toFixed(2) },
-                  { title: '制单人', dataIndex: 'creator', key: 'creator' },
+                  {
+                    title: '制单人',
+                    dataIndex: 'creator',
+                    key: 'creator',
+                    render: (value: string) => memberNames[value] || '已离职/未知成员',
+                  },
                   {
                     title: '操作',
                     key: 'action',
-                    width: 100,
+                    width: 220,
                     align: 'center' as const,
                     render: (_: any, record: IOutboundOrder) => (
                       <div className="flex items-center justify-center gap-1">
+                        {canCreate && (
+                          <Button
+                            size="sm"
+                            onClick={() => startReconciliationForOrder(record)}
+                          >
+                            生成对账单
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           variant="ghost"
@@ -1112,7 +1133,7 @@ const ReconciliationPage: React.FC = () => {
                         >
                           <Eye className="w-4 h-4" />
                         </Button>
-                        <Button
+                        {canUndoOutbound && <Button
                           size="sm"
                           variant="ghost"
                           className="text-destructive hover:text-destructive hover:bg-destructive/10"
@@ -1120,7 +1141,7 @@ const ReconciliationPage: React.FC = () => {
                           title="删除"
                         >
                           <Trash2 className="w-4 h-4" />
-                        </Button>
+                        </Button>}
                       </div>
                     ),
                   },
@@ -1376,7 +1397,7 @@ const ReconciliationPage: React.FC = () => {
                                   />
                                 </td>
                                 <td className="p-2 text-sm" rowSpan={order.details?.length || 1}>{order.outboundNo}</td>
-                                <td className="p-2 text-sm" rowSpan={order.details?.length || 1}>{order.outboundDate}</td>
+                                <td className="p-2 text-sm" rowSpan={order.details?.length || 1}>{formatDate(order.outboundDate)}</td>
                               </>
                             )}
                             <td className="p-2 text-sm">{detail.productName}</td>
@@ -1503,7 +1524,7 @@ const ReconciliationPage: React.FC = () => {
                     {selectedReconciliation.details?.map((d, i) => (
                       <tr key={i} className="border-t border-border">
                         <td className="p-2 text-sm">{d.outboundNo}</td>
-                        <td className="p-2 text-sm">{d.outboundDate}</td>
+                        <td className="p-2 text-sm">{formatDate(d.outboundDate)}</td>
                         <td className="p-2 text-sm">{d.productName}</td>
                         <td className="p-2 text-sm">{d.workpieceNo || '-'}</td>
                         <td className="p-2 text-sm">{d.process || '-'}</td>
@@ -1568,7 +1589,7 @@ const ReconciliationPage: React.FC = () => {
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div><span className="text-muted-foreground">客户：</span>{selectedOutboundOrder.customerName}</div>
                 <div><span className="text-muted-foreground">客户编号：</span>{selectedOutboundOrder.customerCode}</div>
-                <div><span className="text-muted-foreground">出库日期：</span>{selectedOutboundOrder.outboundDate}</div>
+                <div><span className="text-muted-foreground">出库日期：</span>{formatDate(selectedOutboundOrder.outboundDate)}</div>
                 <div><span className="text-muted-foreground">制单人：</span>{selectedOutboundOrder.creator}</div>
                 {selectedOutboundOrder.receiver && (
                   <div><span className="text-muted-foreground">收货人：</span>{selectedOutboundOrder.receiver}</div>

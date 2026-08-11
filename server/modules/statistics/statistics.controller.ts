@@ -1,4 +1,6 @@
 import { Controller, Get, Query, Post, Body } from '@nestjs/common';
+import { CanRole } from '@lark-apaas/fullstack-nestjs-core';
+import { parsePositiveInt } from '../../common/utils/pagination';
 import { StatisticsService } from './statistics.service';
 
 @Controller('api/statistics')
@@ -6,6 +8,7 @@ export class StatisticsController {
   constructor(private readonly statisticsService: StatisticsService) {}
 
   @Get('overview')
+  @CanRole('statistics:view')
   async getOverview(
     @Query('startDate') startDate: string,
     @Query('endDate') endDate: string,
@@ -20,6 +23,7 @@ export class StatisticsController {
   }
 
   @Get('customers')
+  @CanRole('statistics:view')
   async getCustomerStats(
     @Query('startDate') startDate: string,
     @Query('endDate') endDate: string,
@@ -31,11 +35,12 @@ export class StatisticsController {
     return this.statisticsService.getCustomerStats({
       startDate: startDate || thirtyDaysAgo,
       endDate: endDate || today,
-      limit: limit ? parseInt(limit, 10) : 10,
+      limit: parsePositiveInt(limit, 10, 100),
     });
   }
 
   @Get('products')
+  @CanRole('statistics:view')
   async getProductStats(
     @Query('startDate') startDate: string,
     @Query('endDate') endDate: string,
@@ -47,16 +52,18 @@ export class StatisticsController {
     return this.statisticsService.getProductStats({
       startDate: startDate || thirtyDaysAgo,
       endDate: endDate || today,
-      limit: limit ? parseInt(limit, 10) : 10,
+      limit: parsePositiveInt(limit, 10, 100),
     });
   }
 
   @Get('inventory')
+  @CanRole('statistics:view')
   async getInventoryStats() {
     return this.statisticsService.getInventoryStats();
   }
 
   @Get('finance')
+  @CanRole('statistics:view')
   async getFinanceStats(
     @Query('startDate') startDate: string,
     @Query('endDate') endDate: string,
@@ -71,6 +78,7 @@ export class StatisticsController {
   }
 
   @Post('generate')
+  @CanRole('statistics:view')
   async generateStats(@Body() data: { date: string }) {
     const date = data.date ? new Date(data.date) : new Date();
     return this.statisticsService.generateDailyStats(date);

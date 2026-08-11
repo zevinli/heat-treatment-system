@@ -47,12 +47,21 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     } else {
       // 未知异常
       httpStatus = HttpStatus.INTERNAL_SERVER_ERROR;
+      // 生产环境绝不能把堆栈、数据库错误或底层 cause 返回给浏览器；
+      // 这些信息可能包含 SQL、表名、文件路径以及凭据片段。
+      const diagnostics = process.env.NODE_ENV === 'production'
+        ? {}
+        : {
+            stack: exception instanceof Error ? exception.stack : undefined,
+            cause: exception instanceof Error && exception.cause !== undefined
+              ? String(exception.cause)
+              : undefined,
+          };
       errorResponse = {
         error: {
           code: ResponseCode.INTERNAL_ERROR,
           message: '服务器内部错误',
-          stack: (exception as Error).stack,
-          cause: (exception as Error).cause as string,
+          ...diagnostics,
           timestamp: Date.now(),
         },
       };

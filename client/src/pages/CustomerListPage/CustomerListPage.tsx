@@ -52,6 +52,8 @@ import { getCustomers, createCustomer, updateCustomer, deleteCustomer, checkCanD
 } from '@/api';
 import type { Customer } from '@shared/api.interface';
 import { useData } from '@/data/DataContext';
+import { useAppPermission } from '@/hooks/useAppPermission';
+import { useTenant } from '@/contexts/TenantContext';
 
 // 表单数据类型
 interface ICustomerFormData {
@@ -89,7 +91,11 @@ const categoryOptions = ['', '单产', '量产', '零售', '批发'];
 const CustomerListPage: React.FC = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { currentTenant } = useTenant();
   const { refreshCustomers } = useData();
+  const canCreate = useAppPermission('customer:create');
+  const canUpdate = useAppPermission('customer:update');
+  const canDelete = useAppPermission('customer:delete');
   
   // 筛选状态
   const [searchKeyword, setSearchKeyword] = useState<string>('');
@@ -128,13 +134,24 @@ const CustomerListPage: React.FC = () => {
 
   // 查询客户列表
   const { data: customersData, isLoading, refetch } = useQuery({
-    queryKey: ['customers', searchKeyword, statusFilter],
-    queryFn: () => getCustomers({
-      search: searchKeyword || undefined,
-      status: statusFilter || undefined,
-      page: 1,
-      pageSize: 100,
-    }),
+    queryKey: ['customers', currentTenant?.orgCode, searchKeyword, statusFilter],
+    queryFn: async () => {
+      const items: Customer[] = [];
+      for (let page = 1; page <= 50; page++) {
+        const response = await getCustomers({
+          search: searchKeyword || undefined,
+          status: statusFilter || undefined,
+          page,
+          pageSize: 500,
+        });
+        items.push(...response.items);
+        if (items.length >= Number(response.total || 0) || response.items.length < 500) {
+          return { ...response, items, total: Number(response.total || items.length), page: 1, pageSize: items.length };
+        }
+      }
+      throw new Error('客户数量超过25000条，请使用搜索条件缩小范围');
+    },
+    enabled: Boolean(currentTenant?.orgCode),
   });
 
   const customers = customersData?.items || [];
@@ -187,14 +204,17 @@ const CustomerListPage: React.FC = () => {
   // 处理导入的客户数据
   const handleImportCustomers = async (importedCustomers: Partial<Customer>[]) => {
     // 检查编码是否已存在
-    const existingCodes = new Set(customers.map(c => c.code));
+    const existingCodes = new Set(customers.map(c => c.code.trim().toLowerCase()));
+    const seenCodes = new Set(existingCodes);
     const duplicates: string[] = [];
     const validCustomers = importedCustomers.filter((customer) => {
-      if (!customer.code || !customer.name) return false;
-      if (existingCodes.has(customer.code)) {
+      if (!customer.code?.trim() || !customer.name?.trim()) return false;
+      const normalizedCode = customer.code.trim().toLowerCase();
+      if (seenCodes.has(normalizedCode)) {
         duplicates.push(customer.code);
         return false;
       }
+      seenCodes.add(normalizedCode);
       return true;
     });
 
@@ -240,6 +260,7 @@ const CustomerListPage: React.FC = () => {
     if (failCount > 0) {
       toast.error(`${failCount} 条客户数据导入失败`);
     }
+    if (successCount === 0) throw new Error('客户导入失败，请检查编号、名称和重复数据');
   };
 
   // 清空筛选
@@ -538,22 +559,16 @@ const CustomerListPage: React.FC = () => {
           >
             <EyeIcon className="w-4 h-4" />
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-8 p-0"
-            onClick={() => handleEdit(record)}
-          >
-            <EditIcon className="w-4 h-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-8 p-0 text-destructive hover:text-destructive"
-            onClick={() => handleDelete(record)}
-          >
-            <Trash2Icon className="w-4 h-4" />
-          </Button>
+          {canUpdate && (
+            <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => handleEdit(record)} title="编辑客户">
+              <EditIcon className="w-4 h-4" />
+            </Button>
+          )}
+          {canDelete && (
+            <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-destructive hover:text-destructive" onClick={() => handleDelete(record)} title="删除客户">
+              <Trash2Icon className="w-4 h-4" />
+            </Button>
+          )}
         </div>
       ),
     },
@@ -570,7 +585,7 @@ const CustomerListPage: React.FC = () => {
             </CardTitle>
             <div className="flex gap-2">
               {/* 批量操作按钮组 */}
-              {selectedCustomerIds.length > 0 && (
+              {canDelete && selectedCustomerIds.length > 0 && (
                 <>
                   <Button
                     size="sm"
@@ -601,14 +616,18 @@ const CustomerListPage: React.FC = () => {
                 <Download className="w-4 h-4 mr-1" />
                 Excel导出
               </Button>
-              <Button size="sm" variant="outline" onClick={() => setImportDialogOpen(true)}>
-                <Upload className="w-4 h-4 mr-1" />
-                Excel导入
-              </Button>
-              <Button size="sm" className="bg-primary" onClick={handleAdd}>
-                <PlusIcon className="w-4 h-4 mr-1" />
-                新增客户
-              </Button>
+              {canCreate && (
+                <>
+                  <Button size="sm" variant="outline" onClick={() => setImportDialogOpen(true)}>
+                    <Upload className="w-4 h-4 mr-1" />
+                    Excel导入
+                  </Button>
+                  <Button size="sm" className="bg-primary" onClick={handleAdd}>
+                    <PlusIcon className="w-4 h-4 mr-1" />
+                    新增客户
+                  </Button>
+                </>
+              )}
             </div>
           </div>
         </CardHeader>
@@ -654,7 +673,7 @@ const CustomerListPage: React.FC = () => {
               columns={columns}
               dataSource={customers}
               rowKey="id"
-              rowSelection={{
+              rowSelection={canDelete ? {
                 type: 'checkbox',
                 selectedRowKeys: selectAllMode === 'all' ? customers.map(c => c.id) : selectedCustomerIds,
                 onChange: (selectedRowKeys: React.Key[]) => {
@@ -692,7 +711,7 @@ const CustomerListPage: React.FC = () => {
                     },
                   },
                 ],
-              }}
+              } : undefined}
               pagination={{
                 pageSize: 10,
                 showSizeChanger: true,
@@ -1047,7 +1066,7 @@ const CustomerListPage: React.FC = () => {
 interface ImportCustomerDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onImport: (customers: Partial<Customer>[]) => void;
+  onImport: (customers: Partial<Customer>[]) => void | Promise<void>;
   existingCustomers: Customer[];
 }
 
@@ -1062,6 +1081,7 @@ const ImportCustomerDialog: React.FC<ImportCustomerDialogProps> = ({
   const [editingRow, setEditingRow] = useState<number | null>(null);
   const [editFormData, setEditFormData] = useState<Partial<Customer>>({});
   const [validationErrors, setValidationErrors] = useState<{ row: number; message: string }[]>([]);
+  const [isImporting, setIsImporting] = useState(false);
 
   const existingCodes = new Set(existingCustomers.map(c => c.code));
 
@@ -1210,7 +1230,7 @@ const ImportCustomerDialog: React.FC<ImportCustomerDialogProps> = ({
     }
   };
 
-  const handleConfirmImport = () => {
+  const handleConfirmImport = async () => {
     // 过滤掉无效数据（无编号或名称）
     const validData = previewData.filter(c => c.code && c.name);
     if (validData.length === 0) {
@@ -1224,11 +1244,18 @@ const ImportCustomerDialog: React.FC<ImportCustomerDialogProps> = ({
       return;
     }
     
-    onImport(validData);
-    setStep('upload');
-    setPreviewData([]);
-    setValidationErrors([]);
-    onOpenChange(false);
+    setIsImporting(true);
+    try {
+      await onImport(validData);
+      setStep('upload');
+      setPreviewData([]);
+      setValidationErrors([]);
+      onOpenChange(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '客户导入失败');
+    } finally {
+      setIsImporting(false);
+    }
   };
 
   const handleClose = () => {
@@ -1426,9 +1453,9 @@ const ImportCustomerDialog: React.FC<ImportCustomerDialogProps> = ({
           {step === 'preview' && (
             <Button 
               onClick={handleConfirmImport}
-              disabled={validationErrors.length > 0 || previewData.filter(c => c.code && c.name).length === 0}
+              disabled={isImporting || validationErrors.length > 0 || previewData.filter(c => c.code && c.name).length === 0}
             >
-              确认导入 ({previewData.filter(c => c.code && c.name).length}条)
+              {isImporting ? '导入中...' : `确认导入 (${previewData.filter(c => c.code && c.name).length}条)`}
             </Button>
           )}
         </DialogFooter>

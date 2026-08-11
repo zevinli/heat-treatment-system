@@ -23,8 +23,11 @@ interface PermissionCheckResult {
 const STALE_TIME = 5 * 60 * 1000; // 5 分钟缓存
 
 export function usePermissions(): UsePermissionsReturn {
+  const orgCode = localStorage.getItem('currentOrgCode') || '';
+  const userId = localStorage.getItem('userId') || '';
   const { data, isLoading, error } = useQuery<UserPermissions, Error>({
-    queryKey: ['permissions'],
+    // 权限是“用户 × 组织”维度，固定缓存键会在切换租户后短暂复用上一组织的角色。
+    queryKey: ['permissions', userId, orgCode],
     queryFn: async () => {
       try {
         const response = await axiosForBackend({
@@ -38,6 +41,7 @@ export function usePermissions(): UsePermissionsReturn {
       }
     },
     staleTime: STALE_TIME,
+    enabled: Boolean(userId && orgCode),
     retry: 1,
   });
 
@@ -90,26 +94,19 @@ export function usePermissions(): UsePermissionsReturn {
       };
     }
 
-    // 4. 检查时间窗口（非管理员）
-    if (!isAdmin) {
-      const timeCheck = checkUndoableFrontend(order.createdAt);
-      if (!timeCheck.canUndo) {
-        return {
-          canUndo: false,
-          reason: timeCheck.reason,
-          remainingSeconds: 0,
-        };
-      }
+    // 4. 所有角色都遵守直接撤销时间窗；超期操作必须走审批，管理员也不能绕过业务审计。
+    const timeCheck = checkUndoableFrontend(order.createdAt);
+    if (!timeCheck.canUndo) {
       return {
-        canUndo: true,
-        isAdminOverride: false,
-        remainingSeconds: timeCheck.remainingSeconds,
+        canUndo: false,
+        reason: timeCheck.reason,
+        remainingSeconds: 0,
       };
     }
-
     return {
       canUndo: true,
       isAdminOverride: !isCreator && isAdmin,
+      remainingSeconds: timeCheck.remainingSeconds,
     };
   };
 
@@ -144,11 +141,9 @@ export function usePermissions(): UsePermissionsReturn {
       };
     }
 
-    // 入库单无时间限制，只需检查批次（需后端确认）
-    return {
-      canUndo: true,
-      isAdminOverride: !isCreator && isAdmin,
-    };
+    const timeCheck = checkUndoableFrontend(order.createdAt);
+    if (!timeCheck.canUndo) return timeCheck;
+    return { canUndo: true, isAdminOverride: !isCreator && isAdmin, remainingSeconds: timeCheck.remainingSeconds };
   };
 
   return {

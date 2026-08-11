@@ -5,6 +5,9 @@ declare namespace Express {
       userId?: string;
       userName?: string;
       orgCode?: string;
+      orgRole?: string;
+      accountRole?: string;
+      businessRole?: string;
       userRole?: string;
       permissions?: string[];
       tokenId?: string;

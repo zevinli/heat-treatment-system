@@ -20,18 +20,22 @@ import {
 import { Building2, Plus, Users, Settings, ChevronRight, Loader2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { axiosForBackend } from '@lark-apaas/client-toolkit/utils/getAxiosForBackend';
+import { useTenant } from '@/contexts/TenantContext';
+import { applyTenantRole, restoreAccountRole } from '@/lib/auth-session';
 
 interface Organization {
   id: string;
   code: string;
   name: string;
   role: 'super_admin' | 'admin' | 'member';
+  businessRole: 'admin' | 'operator' | 'finance' | 'viewer';
   status: 'active' | 'suspended' | 'inactive';
   createdAt: string;
 }
 
 export default function OrganizationPage() {
   const navigate = useNavigate();
+  const { setCurrentTenant } = useTenant();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -43,6 +47,7 @@ export default function OrganizationPage() {
   const [joinDialogOpen, setJoinDialogOpen] = useState(false);
 
   useEffect(() => {
+    restoreAccountRole();
     fetchOrganizations();
   }, []);
 
@@ -86,14 +91,9 @@ export default function OrganizationPage() {
       setNewOrgCode('');
       
       // 自动选中并进入
-      localStorage.setItem('currentOrgCode', org.code);
-      localStorage.setItem('currentOrgId', org.id);
-      localStorage.setItem('currentOrgName', org.name);
-      
-      setTimeout(() => {
-        navigate('/', { replace: true });
-        window.location.reload();
-      }, 500);
+      setCurrentTenant({ orgCode: org.code, orgId: org.id, orgName: org.name });
+      applyTenantRole('super_admin', 'admin');
+      navigate('/dashboard', { replace: true });
     } catch (error: any) {
       toast.error(error?.response?.data?.message || error?.message || '创建失败，请重试');
     } finally {
@@ -124,12 +124,9 @@ export default function OrganizationPage() {
   };
 
   const handleSelectOrg = (org: Organization) => {
-    localStorage.setItem('currentOrgCode', org.code);
-    localStorage.setItem('currentOrgId', org.id);
-    localStorage.setItem('currentOrgName', org.name);
-    
-    navigate('/', { replace: true });
-    window.location.reload();
+    setCurrentTenant({ orgCode: org.code, orgId: org.id, orgName: org.name });
+    applyTenantRole(org.role, org.businessRole);
+    navigate('/dashboard', { replace: true });
   };
 
   const getRoleLabel = (role: string) => {

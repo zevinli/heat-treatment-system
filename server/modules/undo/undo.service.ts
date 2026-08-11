@@ -1,10 +1,10 @@
 import { Injectable, Inject, NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
-import { eq, and, sql, desc } from 'drizzle-orm';
+import { eq, and, sql, desc, inArray } from 'drizzle-orm';
 import {
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
 import { TENANT_DATABASE } from '../../common/tenant-database.provider';
-import { outboundOrderTable, outboundDetail, productTable, productBatchTable, productBatchStockTable, undoLogTable, inventoryRecordTable, reconciliationTable, inboundOrderTable, operationLogTable, customer } from '../../database/schema';
+import { outboundOrderTable, outboundDetail, productTable, productBatchTable, productBatchStockTable, undoLogTable, inventoryRecordTable, reconciliationTable, inboundOrderTable, operationLogTable, customer, approvalRequestTable } from '../../database/schema';
 import { checkUndoable } from '../../common/utils/undo-check.util';
 import { PermissionService } from '../permission/permission.service';
 
@@ -23,7 +23,7 @@ export class UndoService {
   /**
    * 检查出库单是否可撤销
    */
-  async canUndoOutbound(outboundOrderId: string): Promise<{
+  async canUndoOutbound(outboundOrderId: string, operatorId?: string, allowAny = false): Promise<{
     canUndo: boolean;
     reason?: string;
     remainingSeconds?: number;
@@ -40,13 +40,23 @@ export class UndoService {
     if (order.status === 'cancelled') {
       return { canUndo: false, reason: '该出库单已撤销' };
     }
+    if (operatorId && !allowAny && order.creator !== operatorId) {
+      return { canUndo: false, reason: '普通操作员只能撤销自己创建的出库单' };
+    }
 
     if (order.lockStatus === 'locked' || order.reconciliationId) {
       return { canUndo: false, reason: '该出库单已参与对账，无法撤销' };
     }
 
     // 使用统一工具函数检查撤销时限
-    const timeCheck = checkUndoable(order.createdAt, false);
+    const [approvedRequest] = await this.db.select({ id: approvalRequestTable.id })
+      .from(approvalRequestTable)
+      .where(and(
+        eq(approvalRequestTable.entityId, outboundOrderId),
+        eq(approvalRequestTable.type, 'outbound_undo'),
+        eq(approvalRequestTable.status, 'approved'),
+      )).limit(1);
+    const timeCheck = checkUndoable(order.createdAt, Boolean(approvedRequest));
     if (!timeCheck.canUndo) {
       return { canUndo: false, reason: timeCheck.reason };
     }
@@ -101,6 +111,80 @@ export class UndoService {
     }
 
     return { canUndo: true };
+  }
+
+  async requestApproval(
+    type: 'inbound_undo' | 'outbound_undo',
+    entityType: 'inbound_order' | 'outbound_order',
+    entityId: string,
+    requester: string,
+    reason: string,
+  ) {
+    const normalizedReason = reason?.trim();
+    if (!normalizedReason || normalizedReason.length < 5) {
+      throw new BadRequestException('撤销原因至少需要5个字符');
+    }
+    const [existing] = await this.db.select({ id: approvalRequestTable.id })
+      .from(approvalRequestTable)
+      .where(and(
+        eq(approvalRequestTable.type, type),
+        eq(approvalRequestTable.entityId, entityId),
+        eq(approvalRequestTable.status, 'pending'),
+      )).limit(1);
+    if (existing) throw new BadRequestException('该单据已有待处理的撤销申请');
+    try {
+      const [request] = await this.db.insert(approvalRequestTable).values({
+        type,
+        entityType,
+        entityId,
+        requester,
+        reason: normalizedReason,
+        status: 'pending',
+      }).returning();
+      return request;
+    } catch (error: any) {
+      if (error?.code === '23505') throw new ConflictException('该单据已有待处理的撤销申请');
+      throw error;
+    }
+  }
+
+  async listApprovals(status: 'pending' | 'approved' | 'rejected' = 'pending') {
+    return this.db.select().from(approvalRequestTable)
+      .where(and(
+        inArray(approvalRequestTable.type, ['inbound_undo', 'outbound_undo']),
+        eq(approvalRequestTable.status, status),
+      ))
+      .orderBy(desc(approvalRequestTable.requestedAt));
+  }
+
+  async getApproval(id: string) {
+    const [request] = await this.db.select().from(approvalRequestTable)
+      .where(and(
+        eq(approvalRequestTable.id, id),
+        inArray(approvalRequestTable.type, ['inbound_undo', 'outbound_undo']),
+      )).limit(1);
+    if (!request) throw new NotFoundException('撤销审批申请不存在');
+    return request;
+  }
+
+  async settleApproval(id: string, approver: string, approved: boolean, rejectReason?: string) {
+    if (!approved && (!rejectReason?.trim() || rejectReason.trim().length < 2)) {
+      throw new BadRequestException('拒绝时请输入至少2个字符的原因');
+    }
+    const [updated] = await this.db.update(approvalRequestTable).set({
+      status: approved ? 'approved' : 'rejected',
+      approver,
+      ...(approved ? { approvedAt: new Date(), rejectedAt: null, rejectReason: null } : {
+        rejectedAt: new Date(),
+        rejectReason: rejectReason!.trim(),
+      }),
+      updatedAt: new Date(),
+    }).where(and(
+      eq(approvalRequestTable.id, id),
+      eq(approvalRequestTable.status, 'pending'),
+    )).returning();
+    if (!updated) throw new ConflictException('审批申请已被其他人处理');
+    return updated;
   }
 
 }

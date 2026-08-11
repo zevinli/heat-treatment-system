@@ -149,6 +149,11 @@ export class PermissionService {
    * 为用户分配角色
    */
   async assignRole(userId: string, roleName: string, actorId: string) {
+    const [actor] = await this.masterDb.select({ role: appUserTable.role, status: appUserTable.status })
+      .from(appUserTable).where(eq(appUserTable.id, actorId)).limit(1);
+    if (!actor || actor.status !== 'active' || actor.role !== 'admin') {
+      throw new ForbiddenException('仅平台管理员可修改全局账号角色');
+    }
     if (!Object.prototype.hasOwnProperty.call(ROLE_PERMISSIONS, roleName)) {
       throw new ForbiddenException('无效角色');
     }

@@ -6,6 +6,7 @@ import { TenantConnectionService } from '../../modules/tenant/tenant-connection.
 import { organization, organizationUser } from '../../database/schema';
 import { TENANT_CONTEXT, type TenantContext } from '../decorators/tenant.decorator';
 import { tenantAsyncStorage } from '../tenant-context.storage';
+import { permissionsForRole } from '../auth/permissions';
 
 /**
  * 租户中间件
@@ -22,6 +23,11 @@ export class TenantMiddleware implements NestMiddleware {
 
   async use(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
+      // 登录和健康检查与租户无关。即使浏览器残留了上一会话的组织头，
+      // 也不能让失效/损坏的租户配置阻断用户重新登录。
+      if (req.path === '/api/auth/login' || req.path === '/api/auth/register' || req.path.startsWith('/api/health')) {
+        return next();
+      }
       // 1. 从请求头获取组织编码
       const orgCode = this.extractOrgCode(req);
 
@@ -52,14 +58,24 @@ export class TenantMiddleware implements NestMiddleware {
       // 4. 验证用户是否有权访问该组织
       const userId = req.userContext?.userId;
       if (userId) {
-        const hasAccess = await this.verifyUserOrgAccess(userId, orgCode, this.masterDb);
-        if (!hasAccess) {
+        const membership = await this.getUserOrgMembership(userId, orgCode, this.masterDb);
+        if (!membership) {
           // 如果用户没有权限，但访问的是公开路由则允许继续
           if (this.isPublicRoute(req.path)) {
             return next();
           }
           throw new ForbiddenException('Access denied for this organization');
         }
+        // 组织内角色是租户权限边界。组织管理员拥有该组织管理权限；普通成员
+        // 继承账号的业务角色，但全局 admin 以普通成员加入时不能自动获得租户管理员权限。
+        const effectiveRole = ['super_admin', 'admin'].includes(membership.role || '')
+          ? 'admin'
+          : membership.businessRole || 'operator';
+        req.userContext!.orgCode = orgCode;
+        req.userContext!.orgRole = membership.role || 'member';
+        req.userContext!.businessRole = membership.businessRole || 'operator';
+        req.userContext!.userRole = effectiveRole;
+        req.userContext!.permissions = permissionsForRole(effectiveRole);
       }
 
       // 5. 获取租户数据库连接。生产环境禁止静默回退主库，避免跨租户数据泄漏。
@@ -107,14 +123,14 @@ export class TenantMiddleware implements NestMiddleware {
   /**
    * 验证用户是否有权访问该组织
    */
-  private async verifyUserOrgAccess(
+  private async getUserOrgMembership(
     userId: string,
     orgCode: string,
     masterDb: any,
-  ): Promise<boolean> {
+  ): Promise<{ id: string; role: string | null; businessRole: string } | null> {
     try {
       const result = await masterDb
-        .select({ id: organizationUser.id })
+        .select({ id: organizationUser.id, role: organizationUser.role, businessRole: organizationUser.businessRole })
         .from(organizationUser)
         .innerJoin(organization, eq(organizationUser.orgId, organization.id))
         .where(
@@ -127,10 +143,10 @@ export class TenantMiddleware implements NestMiddleware {
         )
         .limit(1);
 
-      return result.length > 0;
+      return result[0] || null;
     } catch (error) {
       this.logger.error('Error verifying user org access:', error instanceof Error ? error.message : String(error));
-      return false;
+      return null;
     }
   }
 
@@ -161,6 +177,7 @@ export class TenantMiddleware implements NestMiddleware {
       '/api/tenant/organizations',
       '/api/tenant/join',
       '/api/auth/login',
+      '/api/auth/register',
       '/api/auth/callback',
       '/api/health',
       '/api/invites',

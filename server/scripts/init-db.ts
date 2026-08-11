@@ -8,8 +8,10 @@ type SqlDatabase = {
   close(): Promise<void>;
 };
 
-async function openDatabase(targetUrl?: string): Promise<SqlDatabase> {
-  const databaseUrl = targetUrl || process.env.DATABASE_URL || process.env.SUDA_DATABASE_URL;
+async function openDatabase(targetUrl?: string, pgliteDataDir?: string): Promise<SqlDatabase> {
+  // 显式指定 PGlite 目录时必须忽略进程中的 DATABASE_URL；这是本地多租户
+  // 独立数据库的入口，不能意外把租户表建到主 PostgreSQL 中。
+  const databaseUrl = pgliteDataDir ? undefined : (targetUrl || process.env.DATABASE_URL || process.env.SUDA_DATABASE_URL);
   if (databaseUrl) {
     const client = postgres(databaseUrl, { max: 1, connect_timeout: 15 });
     return {
@@ -18,13 +20,13 @@ async function openDatabase(targetUrl?: string): Promise<SqlDatabase> {
       close: () => client.end(),
     };
   }
-  const client = new PGlite(process.env.PGLITE_DATA_DIR || join(process.cwd(), 'data'));
+  const client = new PGlite(pgliteDataDir || process.env.PGLITE_DATA_DIR || join(process.cwd(), 'data'));
   return client as unknown as SqlDatabase;
 }
 
-export async function initializeDatabase(targetUrl?: string) {
+export async function initializeDatabase(targetUrl?: string, pgliteDataDir?: string) {
   console.log("=== Initializing Database ===");
-  const db = await openDatabase(targetUrl);
+  const db = await openDatabase(targetUrl, pgliteDataDir);
   
   // Step 1: Create custom composite types (needed for drizzle compatibility)
   console.log("Creating composite types...");
@@ -75,6 +77,7 @@ export async function initializeDatabase(targetUrl?: string) {
       org_id UUID NOT NULL REFERENCES organization(id),
       user_id VARCHAR(255) NOT NULL,
       role VARCHAR(50) DEFAULT 'member',
+      business_role VARCHAR(50) NOT NULL DEFAULT 'operator',
       status VARCHAR(50) DEFAULT 'active',
       joined_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
       _created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -88,10 +91,12 @@ export async function initializeDatabase(targetUrl?: string) {
       org_id UUID NOT NULL REFERENCES organization(id),
       invite_code VARCHAR(255) NOT NULL UNIQUE,
       role VARCHAR(50) DEFAULT 'member',
+      business_role VARCHAR(50) NOT NULL DEFAULT 'operator',
       created_by VARCHAR(255),
       expires_at TIMESTAMPTZ,
-      max_uses INTEGER DEFAULT 10,
+      max_uses INTEGER DEFAULT 1,
       used_count INTEGER DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
       _created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
       _created_by VARCHAR(255),
       _updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -124,6 +129,8 @@ export async function initializeDatabase(targetUrl?: string) {
       location VARCHAR(255),
       status VARCHAR(50) NOT NULL DEFAULT 'active',
       device_limit INTEGER NOT NULL DEFAULT 3 CHECK (device_limit > 0),
+      failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+      locked_until TIMESTAMPTZ,
       last_login_at TIMESTAMPTZ,
       _created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       _updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -139,6 +146,24 @@ export async function initializeDatabase(targetUrl?: string) {
       _created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_auth_session_user ON auth_session(user_id);
+
+    CREATE TABLE IF NOT EXISTS integration_sync_job (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      topic VARCHAR(50) NOT NULL,
+      aggregate_key VARCHAR(255) NOT NULL,
+      payload JSONB NOT NULL,
+      status VARCHAR(30) NOT NULL DEFAULT 'pending',
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      locked_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      last_error TEXT,
+      _created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      _updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(topic, aggregate_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_integration_sync_job_due
+      ON integration_sync_job(status, next_attempt_at);
 
     -- ======== Business tables ========
     CREATE TABLE IF NOT EXISTS customer (
@@ -569,6 +594,27 @@ export async function initializeDatabase(targetUrl?: string) {
     ALTER TABLE app_user ADD COLUMN IF NOT EXISTS avatar TEXT;
     ALTER TABLE app_user ADD COLUMN IF NOT EXISTS position VARCHAR(255);
     ALTER TABLE app_user ADD COLUMN IF NOT EXISTS location VARCHAR(255);
+    ALTER TABLE app_user ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE app_user ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'organization_user' AND column_name = 'business_role'
+      ) THEN
+        ALTER TABLE organization_user ADD COLUMN business_role VARCHAR(50) NOT NULL DEFAULT 'operator';
+        UPDATE organization_user ou
+          SET business_role = CASE
+            WHEN ou.role IN ('super_admin', 'admin') THEN 'admin'
+            WHEN account.role IN ('finance', 'viewer') THEN account.role
+            ELSE 'operator'
+          END
+          FROM app_user account
+          WHERE account.id::text = ou.user_id;
+      END IF;
+    END $$;
+    ALTER TABLE organization_invite ADD COLUMN IF NOT EXISTS business_role VARCHAR(50) NOT NULL DEFAULT 'operator';
+    ALTER TABLE organization_invite ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
     ALTER TABLE product ADD COLUMN IF NOT EXISTS batch_no VARCHAR(255);
     ALTER TABLE outbound_detail ADD COLUMN IF NOT EXISTS close_order BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE outbound_order ADD COLUMN IF NOT EXISTS weight DOUBLE PRECISION DEFAULT 0;
@@ -585,10 +631,15 @@ export async function initializeDatabase(targetUrl?: string) {
       WHERE stock.batch_id = batch.id AND stock.product_id IS NULL;
     CREATE INDEX IF NOT EXISTS idx_inbound_order_no ON inbound_order(inbound_no);
     CREATE INDEX IF NOT EXISTS idx_outbound_order_no ON outbound_order(outbound_no);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_product_code ON product(code);
     CREATE INDEX IF NOT EXISTS idx_outbound_batch_detail_outbound ON outbound_batch_detail(outbound_detail_id);
     CREATE INDEX IF NOT EXISTS idx_product_batch_stock_product ON product_batch_stock(product_id);
     CREATE INDEX IF NOT EXISTS idx_reconciliation_detail_active ON reconciliation_detail(reconciliation_id, is_active);
     CREATE INDEX IF NOT EXISTS idx_approval_request_status ON approval_request(status, type);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_request_pending_entity
+      ON approval_request(type, entity_id) WHERE status = 'pending';
+    CREATE INDEX IF NOT EXISTS idx_integration_sync_job_due ON integration_sync_job(status, next_attempt_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_org_user_org_user ON organization_user(org_id, user_id);
   `);
   console.log("Tables created successfully!");
 
@@ -596,7 +647,7 @@ export async function initializeDatabase(targetUrl?: string) {
   const { rows } = await db.query(`SELECT COUNT(*) as cnt FROM organization`);
   const count = Number((rows[0] as any).cnt);
   
-  if (count === 0 && process.env.NODE_ENV !== 'production' && !targetUrl) {
+  if (count === 0 && process.env.NODE_ENV !== 'production' && !targetUrl && !pgliteDataDir) {
     console.log("Seeding default organization...");
     await db.exec(`INSERT INTO organization (code, name, db_name, status) VALUES ('default', '默认组织', 'db_tenant_default', 'active')`);
     console.log("Default organization created (code: 'default')");

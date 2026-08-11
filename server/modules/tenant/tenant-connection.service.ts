@@ -1,8 +1,12 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { DRIZZLE_DATABASE } from '@lark-apaas/fullstack-nestjs-core';
 import { eq } from 'drizzle-orm';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
+import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
+import { PGlite } from '@electric-sql/pglite';
+import { join } from 'path';
+import { mkdir } from 'fs/promises';
 import type * as tenantSchema from '../../database/schema';
 import { organization } from '../../database/schema';
 import { initializeDatabase } from '../../scripts/init-db';
@@ -17,18 +21,32 @@ export interface OrganizationConfig {
   dbPassword: string | null;
 }
 
+type TenantClient = ReturnType<typeof postgres> | PGlite;
+
 /**
  * 租户数据库连接服务
  * 管理每个租户的数据库连接池
  */
 @Injectable()
-export class TenantConnectionService {
+export class TenantConnectionService implements OnModuleDestroy {
   private readonly logger = new Logger(TenantConnectionService.name);
   private connections: Map<string, any> = new Map();
+  private clients: Map<string, TenantClient> = new Map();
   private configs: Map<string, OrganizationConfig> = new Map();
+  /** 同一租户首次访问时复用正在创建的连接，避免页面并发请求重复初始化数据库。 */
+  private pendingConnections: Map<string, Promise<any>> = new Map();
 
   constructor(@Inject(DRIZZLE_DATABASE) private readonly masterDb: any) {
     this.logger.log('TenantConnectionService initialized');
+  }
+
+  async onModuleDestroy() {
+    await Promise.allSettled(Array.from(this.pendingConnections.values()));
+    await Promise.allSettled(Array.from(this.clients.values()).map(client => this.closeClient(client)));
+    this.pendingConnections.clear();
+    this.clients.clear();
+    this.connections.clear();
+    this.configs.clear();
   }
 
   /**
@@ -47,20 +65,37 @@ export class TenantConnectionService {
       return cachedDb;
     }
 
+    const pendingDb = this.pendingConnections.get(orgCode);
+    if (pendingDb) return pendingDb;
+
+    const creation = this.createAndCacheTenantConnection(orgCode, masterDb);
+    this.pendingConnections.set(orgCode, creation);
+    try {
+      return await creation;
+    } finally {
+      if (this.pendingConnections.get(orgCode) === creation) {
+        this.pendingConnections.delete(orgCode);
+      }
+    }
+  }
+
+  private async createAndCacheTenantConnection(orgCode: string, masterDb: any): Promise<any> {
+    // 创建期间再次检查缓存，兼容清理/热更新边界。
+    const cachedDb = this.connections.get(orgCode);
+    if (cachedDb) return cachedDb;
+
     // 2. 从主库查询租户数据库配置
     const orgConfig = await this.getOrganizationConfig(orgCode, masterDb);
     if (!orgConfig) {
-      if (process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEV_MASTER_DB_FALLBACK !== 'false') {
-        return masterDb;
-      }
       throw new Error(`Organization '${orgCode}' not found`);
     }
 
     // 3. 创建新的数据库连接
-    const db = await this.createTenantConnection(orgConfig);
+    const { db, client } = await this.createTenantConnection(orgConfig);
 
     // 4. 缓存连接
     this.connections.set(orgCode, db);
+    this.clients.set(orgCode, client);
     this.configs.set(orgCode, orgConfig);
 
     this.logger.log(`Created tenant database connection for: ${orgCode}`);
@@ -100,11 +135,7 @@ export class TenantConnectionService {
     }
 
     // 验证配置完整性
-    if (!result[0].dbHost || !result[0].dbUser || !result[0].dbPassword) {
-      if (process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEV_MASTER_DB_FALLBACK !== 'false') {
-        this.logger.warn(`Development-only master database fallback for organization: ${orgCode}`);
-        return null;
-      }
+    if ((!result[0].dbHost || !result[0].dbUser || !result[0].dbPassword) && process.env.NODE_ENV === 'production') {
       throw new Error(`Incomplete database configuration for organization: ${orgCode}`);
     }
 
@@ -124,7 +155,20 @@ export class TenantConnectionService {
    */
   private async createTenantConnection(
     config: OrganizationConfig,
-  ): Promise<any> {
+  ): Promise<{ db: any; client: TenantClient }> {
+    if (!config.dbHost || !config.dbUser || !config.dbPassword) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(`Incomplete database configuration for organization: ${config.code}`);
+      }
+      const dataDir = this.localTenantDataDir(config.code);
+      await mkdir(dataDir, { recursive: true });
+      await initializeDatabase(undefined, dataDir);
+      const client = new PGlite(dataDir);
+      const db = drizzlePglite(client, { schema: {} as typeof tenantSchema });
+      await client.query('SELECT 1');
+      this.logger.log(`Created isolated PGlite database for tenant: ${config.code}`);
+      return { db, client };
+    }
     const connectionString = this.connectionString(config, config.dbName);
 
     try {
@@ -139,7 +183,7 @@ export class TenantConnectionService {
       // 测试连接
       await client`SELECT 1`;
 
-      return db;
+      return { db, client };
     } catch (error) {
       this.logger.error(
         `Failed to connect to tenant database: ${config.dbName}`,
@@ -151,7 +195,12 @@ export class TenantConnectionService {
 
   async provisionTenantDatabase(config: Omit<OrganizationConfig, 'id'>): Promise<void> {
     if (!config.dbHost || !config.dbUser || !config.dbPassword) {
-      if (process.env.NODE_ENV !== 'production') return;
+      if (process.env.NODE_ENV !== 'production') {
+        const dataDir = this.localTenantDataDir(config.code);
+        await mkdir(dataDir, { recursive: true });
+        await initializeDatabase(undefined, dataDir);
+        return;
+      }
       throw new Error('生产环境创建组织必须提供完整租户数据库配置');
     }
     const maintenanceDb = process.env.TENANT_MAINTENANCE_DATABASE || 'postgres';
@@ -176,12 +225,31 @@ export class TenantConnectionService {
     return `postgres://${user}:${password}@${config.dbHost}:${config.dbPort || 5432}/${encodeURIComponent(databaseName)}`;
   }
 
+  private localTenantDataDir(orgCode: string): string {
+    const root = process.env.PGLITE_DATA_DIR || join(process.cwd(), 'data');
+    return join(root, 'tenants', orgCode);
+  }
+
+  private async closeClient(client: TenantClient): Promise<void> {
+    if (client instanceof PGlite) {
+      await client.close();
+      return;
+    }
+    await client.end({ timeout: 5 });
+  }
+
   /**
    * 清理指定租户的连接（用于配置变更后刷新）
    */
-  clearConnection(orgCode: string): void {
+  async clearConnection(orgCode: string): Promise<void> {
+    const pending = this.pendingConnections.get(orgCode);
+    if (pending) await pending.catch(() => undefined);
+    const client = this.clients.get(orgCode);
+    this.pendingConnections.delete(orgCode);
     this.connections.delete(orgCode);
+    this.clients.delete(orgCode);
     this.configs.delete(orgCode);
+    if (client) await this.closeClient(client);
     this.logger.log(`Cleared tenant connection for: ${orgCode}`);
   }
 

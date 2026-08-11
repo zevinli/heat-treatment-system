@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import axios from 'axios';
 import { FeishuAuthService } from './feishu-auth.service';
 import { FeishuTenantConfigService, FeishuTenantConfig } from './feishu-tenant-config.service';
@@ -22,6 +22,9 @@ export class FeishuProvisioningService {
    * @param orgName 组织名称（用于飞书表格标题）
    */
   async provision(orgCode: string, orgName: string): Promise<FeishuTenantConfig> {
+    if (!orgCode?.trim() || !orgName?.trim()) {
+      throw new BadRequestException('组织编码和组织名称不能为空');
+    }
     const token = await this.auth.getAccessToken();
     const client = axios.create({
       baseURL: FEISHU_API_BASE,
@@ -40,7 +43,9 @@ export class FeishuProvisioningService {
       throw new Error(`创建多维表格失败：${bitableResp.data.msg}`);
     }
 
-    const appToken = bitableResp.data.data.app.app_token;
+    const appToken = bitableResp.data.data?.app?.app_token;
+    if (!appToken) throw new Error('飞书创建多维表格响应缺少 app_token');
+    const baseUrl = bitableResp.data.data.app.url || `https://feishu.cn/base/${appToken}`;
     this.logger.log(`多维表格创建成功：${appToken}`);
 
     // 2. 依次创建 7 张数据表
@@ -50,6 +55,7 @@ export class FeishuProvisioningService {
     const config: FeishuTenantConfig = {
       orgCode,
       bitableAppToken: appToken,
+      baseUrl,
       isActive: true,
       tableInbound: tableIds.inbound,
       tableOutbound: tableIds.outbound,
@@ -62,6 +68,7 @@ export class FeishuProvisioningService {
 
     await this.configService.saveConfig(orgCode, {
       bitableAppToken: config.bitableAppToken,
+      baseUrl: config.baseUrl,
       isActive: true,
       tableInbound: config.tableInbound,
       tableOutbound: config.tableOutbound,
@@ -77,7 +84,8 @@ export class FeishuProvisioningService {
   }
 
   /**
-   * 创建 5 张业务表并返回各表 ID
+   * 创建 7 张业务表并返回各表 ID。任意表或字段创建失败都终止开通，
+   * 避免把不完整配置标记为已启用，随后所有业务同步持续失败。
    */
   private async createTables(
     client: any,
@@ -100,6 +108,7 @@ export class FeishuProvisioningService {
           { field_name: FIELD_NAMES.inbound.createdAt, type: 5 },
           { field_name: FIELD_NAMES.inbound.createdBy, type: 1 },
           { field_name: FIELD_NAMES.inbound.status, type: 3 },
+          { field_name: FIELD_NAMES.inbound.attachments, type: 17 },
         ],
       },
       {
@@ -133,6 +142,7 @@ export class FeishuProvisioningService {
         key: 'customer',
         name: '客户总览表',
         fields: [
+          { field_name: FIELD_NAMES.customer.code, type: 1 },
           { field_name: FIELD_NAMES.customer.name, type: 1 },
           { field_name: FIELD_NAMES.customer.contact, type: 1 },
           { field_name: FIELD_NAMES.customer.phone, type: 1 },
@@ -147,6 +157,7 @@ export class FeishuProvisioningService {
         key: 'reconciliation',
         name: '每日对账表',
         fields: [
+          { field_name: FIELD_NAMES.reconciliation.orderId, type: 1 },
           { field_name: FIELD_NAMES.reconciliation.date, type: 5 },
           { field_name: FIELD_NAMES.reconciliation.customerName, type: 1 },
           { field_name: FIELD_NAMES.reconciliation.outboundAmount, type: 2 },
@@ -192,14 +203,15 @@ export class FeishuProvisioningService {
     const result: Record<string, string> = {};
 
     for (const table of tables) {
-      const fields = table.fields.map((f, i) => ({
+      const fields = table.fields.map(f => ({
         field_name: f.field_name,
         type: f.type,
         ui_type: f.type === 1 ? 'Text'
           : f.type === 2 ? 'Number'
           : f.type === 3 ? 'SingleSelect'
           : f.type === 5 ? 'DateTime'
-          : f.type === 6 ? 'Progress' : 'Text',
+          : f.type === 6 ? 'Progress'
+          : f.type === 17 ? 'Attachment' : 'Text',
       }));
 
       const resp = await client.post(`/bitable/v1/apps/${appToken}/tables`, {
@@ -208,17 +220,20 @@ export class FeishuProvisioningService {
       });
 
       if (resp.data.code !== 0) {
-        this.logger.error(`创建表 ${table.name} 失败：${resp.data.msg}`);
-        continue;
+        throw new Error(`创建表 ${table.name} 失败：${resp.data.msg || resp.data.code}`);
       }
 
-      const tableId = resp.data.data.table_id;
+      const tableId = resp.data.data?.table_id;
+      if (!tableId) throw new Error(`创建表 ${table.name} 响应缺少 table_id`);
 
       // 再加字段（先创建再添加字段更可靠）
       if (fields.length > 0) {
-        await client.post(`/bitable/v1/apps/${appToken}/tables/${tableId}/fields/batch_create`, {
+        const fieldResp = await client.post(`/bitable/v1/apps/${appToken}/tables/${tableId}/fields/batch_create`, {
           fields,
-        }).catch(err => this.logger.warn(`添加字段到 ${table.name} 部分失败：${err.message}`));
+        });
+        if (fieldResp.data.code !== 0) {
+          throw new Error(`创建表 ${table.name} 的字段失败：${fieldResp.data.msg || fieldResp.data.code}`);
+        }
       }
 
       result[table.key] = tableId;

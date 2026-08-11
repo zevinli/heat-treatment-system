@@ -72,7 +72,7 @@ import { getCustomers } from '@/api';
 interface SmartExcelImportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onImport: (products: Partial<IProduct>[]) => void;
+  onImport: (products: Partial<IProduct>[]) => void | Promise<void>;
   defaultCustomerCode?: string;
   defaultCustomerName?: string;
 }
@@ -1003,6 +1003,7 @@ export const SmartExcelImportDialog: React.FC<SmartExcelImportDialogProps> = ({
   defaultCustomerName,
 }) => {
   const [isLoading, setIsLoading] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [previewState, setPreviewState] = useState<ImportPreviewState | null>(null);
 
   // 全局默认客户（用于填充缺少客户信息的行）
@@ -1030,8 +1031,8 @@ export const SmartExcelImportDialog: React.FC<SmartExcelImportDialogProps> = ({
 
   // 检查是否可以导入 - 只要有选中的行就可以导入
   const canImport = useMemo(() => {
-    return previewState !== null && previewState.selectedRows.length > 0;
-  }, [previewState]);
+    return previewState !== null && previewState.selectedRows.length > 0 && missingCustomerCount === 0;
+  }, [previewState, missingCustomerCount]);
 
   const handleFileSelect = async (file: File) => {
     setIsLoading(true);
@@ -1171,7 +1172,7 @@ export const SmartExcelImportDialog: React.FC<SmartExcelImportDialogProps> = ({
     });
   };
 
-  const handleImport = () => {
+  const handleImport = async () => {
     if (!previewState || previewState.selectedRows.length === 0) {
       toast.error('请先选择要导入的数据');
       return;
@@ -1193,14 +1194,20 @@ export const SmartExcelImportDialog: React.FC<SmartExcelImportDialogProps> = ({
       rowIndex => previewState!.selectedRows.includes(rowIndex)
     ).length;
 
-    if (forcedCount > 0) {
-      toast.success(`已导入 ${products.length} 条数据（含 ${forcedCount} 条强制导入的不完整数据）`);
+    setIsImporting(true);
+    try {
+      await onImport(products);
+      if (forcedCount > 0) {
+        toast.info(`其中 ${forcedCount} 条以待完善状态导入`);
+      }
+      setPreviewState(null);
+      setGlobalDefaultCustomer(null);
+      onOpenChange(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '导入失败，请修正后重试');
+    } finally {
+      setIsImporting(false);
     }
-
-    onImport(products);
-    setPreviewState(null);
-    setGlobalDefaultCustomer(null);
-    onOpenChange(false);
   };
 
   const handleDownloadIssues = () => {
@@ -1309,13 +1316,13 @@ export const SmartExcelImportDialog: React.FC<SmartExcelImportDialogProps> = ({
               </Button>
               <Button
                 onClick={handleImport}
-                disabled={!canImport}
+                disabled={!canImport || isImporting}
                 className={cn(
                   previewState.forcedImportRows.length > 0 && 'border-warning text-warning hover:bg-warning/10'
                 )}
                 title={!canImport && missingCustomerCount > 0 ? '请先设置默认客户' : ''}
               >
-                确认导入 ({previewState.selectedRows.length} 行)
+                {isImporting ? '导入中...' : `确认导入 (${previewState.selectedRows.length} 行)`}
                 {previewState.forcedImportRows.length > 0 && (
                   <span className="ml-1 text-xs">
                     (含{previewState.forcedImportRows.length}行待完善)

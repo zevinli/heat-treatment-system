@@ -14,11 +14,29 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useLocation } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import { axiosForBackend } from '@lark-apaas/client-toolkit/utils/getAxiosForBackend';
+import { useTenant } from '@/contexts/TenantContext';
 import {
   getFeishuTableForPage,
   getAllFeishuTableLinks,
   type FeishuTableLink,
+  type FeishuRuntimeConfig,
 } from '@/config/feishu-tables';
+
+function useFeishuRuntimeConfig() {
+  const { currentTenant } = useTenant();
+  return useQuery<FeishuRuntimeConfig>({
+    queryKey: ['feishu-runtime-tables', currentTenant?.orgCode],
+    enabled: Boolean(currentTenant?.orgCode),
+    staleTime: 5 * 60 * 1000,
+    retry: 1,
+    queryFn: async () => {
+      const response = await axiosForBackend.get('/api/integration/feishu/current/tables');
+      return response.data;
+    },
+  });
+}
 
 /**
  * 飞书多维表格快捷跳转按钮
@@ -39,7 +57,8 @@ interface FeishuContextButtonProps {
 export function FeishuContextButton({ pathname: propPathname }: FeishuContextButtonProps) {
   const location = useLocation();
   const pathname = propPathname || location.pathname;
-  const match = getFeishuTableForPage(pathname);
+  const { data: config } = useFeishuRuntimeConfig();
+  const match = getFeishuTableForPage(pathname, config);
   
   // 当前页面没有对应的飞书表格时不渲染
   if (!match) return null;
@@ -80,11 +99,15 @@ interface FeishuGlobalDropdownProps {
 }
 
 export function FeishuGlobalDropdown({ className }: FeishuGlobalDropdownProps) {
-  const tables = getAllFeishuTableLinks();
+  const { data: config } = useFeishuRuntimeConfig();
+  const tables = getAllFeishuTableLinks(config);
 
   const handleOpenTable = (url: string) => {
     window.open(url, '_blank', 'noopener,noreferrer');
   };
+
+  // 当前租户未开通或配置不完整时不显示无效入口。
+  if (tables.length === 0) return null;
 
   return (
     <DropdownMenu>

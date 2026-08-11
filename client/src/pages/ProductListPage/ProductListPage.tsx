@@ -63,6 +63,8 @@ import { logger } from '@lark-apaas/client-toolkit/logger';
 import { Empty, EmptyDescription, EmptyMedia } from '@/components/ui/empty';
 import { exportToExcel, getProductExportColumns } from '@/utils/excelExport';
 import { SmartExcelImportDialog } from '@/components/SmartExcelImportDialog';
+import { useAppPermission } from '@/hooks/useAppPermission';
+import { createProduct } from '@/api';
 import {
   Filter,
   FilterContent,
@@ -146,7 +148,11 @@ const ProductListPage: React.FC = () => {
     batchDeleteProducts,
     addProduct: addProductToData, 
     updateProduct: updateProductInData,
+    refreshProducts,
   } = useData();
+  const canCreate = useAppPermission('product:create');
+  const canUpdate = useAppPermission('product:update');
+  const canDelete = useAppPermission('product:delete');
   const [searchText, setSearchText] = useState<string | undefined>();
   const [materialFilter, setMaterialFilter] = useState<string | undefined>();
   const [processFilter, setProcessFilter] = useState<string | undefined>();
@@ -183,7 +189,7 @@ const ProductListPage: React.FC = () => {
 
   // 处理导入的产品数据
   // 支持强制导入模式：允许导入不完整数据（缺少必填字段）
-  const handleImportProducts = (importedProducts: Partial<IProduct>[]) => {
+  const handleImportProducts = async (importedProducts: Partial<IProduct>[]) => {
     if (!importedProducts || importedProducts.length === 0) {
       toast.error('没有可导入的数据');
       return;
@@ -192,56 +198,37 @@ const ProductListPage: React.FC = () => {
     // 统计信息
     const incompleteCount = importedProducts.filter(p => p.status === 'incomplete').length;
 
-    // 批量导入产品
-    let successCount = 0;
-    let failCount = 0;
-
-    importedProducts.forEach((product, index) => {
-      try {
-        setTimeout(() => {
-          // 生成唯一ID
-          const newProduct: IProduct = {
-            id: `${Date.now()}_${index}_${Math.random().toString(36).substr(2, 9)}`,
-            // 强制导入模式下，必填字段可能为空，使用占位符
-            code: product.code?.trim() || `待补充_${Date.now()}_${index}`,
-            name: product.name?.trim() || '待补充产品名称',
-            material: product.material || '',
-            process: product.process || '',
-            techRequirement: product.techRequirement || '',
-            workpieceNo: product.workpieceNo || '',
-            unit: product.unit || '件',
-            unitPrice: Number(product.unitPrice) || 0,
-            // 强制导入模式下，客户信息可能为空
-            customerCode: product.customerCode?.trim() || '待补充',
-            customerName: product.customerName?.trim() || '待补充客户',
-            status: (product.status as ProductStatus) || 'complete',
-            remark: product.remark || '',
-            stock: 0,
-            inboundQuantity: 0,
-            inboundWeight: 0,
-            inboundDate: new Date().toISOString().slice(0, 10),
-            batchNo: '',
-          };
-
-          addProductToData(newProduct);
-          successCount++;
-
-          // 最后一条导入完成后显示汇总
-          if (index === importedProducts.length - 1) {
-            if (incompleteCount > 0) {
-              toast.success(
-                `成功导入 ${successCount} 条数据（含 ${incompleteCount} 条不完整数据，请在列表中完善）`
-              );
-            } else {
-              toast.success(`成功导入 ${successCount} 条产品数据`);
-            }
-          }
-        }, index * 50);
-      } catch (error) {
-        failCount++;
-        logger.error(`导入第 ${index + 1} 条产品失败:`, error);
-      }
-    });
+    const timestamp = Date.now();
+    const results: PromiseSettledResult<unknown>[] = [];
+    // 分批并发，避免大 Excel 一次产生数百个请求压垮租户连接池；导入过程不逐条弹 toast。
+    for (let offset = 0; offset < importedProducts.length; offset += 10) {
+      const chunk = importedProducts.slice(offset, offset + 10);
+      results.push(...await Promise.allSettled(chunk.map((product, index) => createProduct({
+        code: product.code?.trim() || `INCOMPLETE_${timestamp}_${offset + index}`,
+        name: product.name?.trim() || '待补充产品名称',
+        material: product.material || '',
+        process: product.process || '',
+        techRequirement: product.techRequirement || '',
+        workpieceNo: product.workpieceNo || '',
+        unit: product.unit || '件',
+        unitPrice: Number(product.unitPrice) || 0,
+        customerCode: product.customerCode?.trim() || '',
+        customerName: product.customerName?.trim() || '',
+        status: (product.status as ProductStatus) || 'complete',
+      }))));
+    }
+    await refreshProducts();
+    const successCount = results.filter(result => result.status === 'fulfilled').length;
+    const failed = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+    failed.forEach((result, index) => logger.error(`产品导入失败 ${index + 1}:`, result.reason));
+    if (successCount === 0) throw new Error('全部产品导入失败，请检查客户、产品编码及必填字段');
+    if (failed.length > 0) {
+      toast.warning(`导入完成：成功 ${successCount} 条，失败 ${failed.length} 条`);
+    } else if (incompleteCount > 0) {
+      toast.success(`成功导入 ${successCount} 条（其中 ${incompleteCount} 条待完善）`);
+    } else {
+      toast.success(`成功导入 ${successCount} 条产品数据`);
+    }
   };
 
   const filteredProducts = useMemo(() => {
@@ -591,31 +578,21 @@ const ProductListPage: React.FC = () => {
           >
             <Eye className="h-4 w-4" />
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-8 p-0"
-            onClick={() => handleEdit(record)}
-          >
-            <Edit className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-8 p-0 text-amber-600 hover:text-amber-600"
-            onClick={() => handleEditThreshold(record)}
-            title="编辑预警阈值"
-          >
-            <Bell className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-8 p-0 text-destructive hover:text-destructive"
-            onClick={() => handleDelete(record)}
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
+          {canUpdate && (
+            <>
+              <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => handleEdit(record)} title="编辑产品">
+                <Edit className="h-4 w-4" />
+              </Button>
+              <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-amber-600 hover:text-amber-600" onClick={() => handleEditThreshold(record)} title="编辑预警阈值">
+                <Bell className="h-4 w-4" />
+              </Button>
+            </>
+          )}
+          {canDelete && (
+            <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-destructive hover:text-destructive" onClick={() => handleDelete(record)} title="删除产品">
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          )}
         </div>
       ),
     },
@@ -631,7 +608,7 @@ const ProductListPage: React.FC = () => {
               产品信息
             </CardTitle>
             <div className="flex gap-2">
-              {selectedProductIds.length > 0 && (
+              {(canUpdate || canDelete) && selectedProductIds.length > 0 && (
                 <>
                   <Button
                     size="sm"
@@ -645,28 +622,16 @@ const ProductListPage: React.FC = () => {
                     <X className="w-4 h-4 mr-1" />
                     取消选择 ({selectAllMode === 'all' ? '全部' : selectedProductIds.length})
                   </Button>
-                  <Button size="sm" variant="outline" onClick={handleBatchSetThreshold} className="text-amber-600 border-amber-200 hover:bg-amber-50">
-                    <Bell className="w-4 h-4 mr-1" />
-                    批量设置阈值 ({selectAllMode === 'all' ? '全部' : selectedProductIds.length})
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={handleBatchDelete} className="text-destructive border-destructive/20 hover:bg-destructive/5">
-                    <Trash2 className="w-4 h-4 mr-1" />
-                    批量删除 ({selectAllMode === 'all' ? '全部' : selectedProductIds.length})
-                  </Button>
+                  {canUpdate && <Button size="sm" variant="outline" onClick={handleBatchSetThreshold} className="text-amber-600 border-amber-200 hover:bg-amber-50"><Bell className="w-4 h-4 mr-1" />批量设置阈值 ({selectAllMode === 'all' ? '全部' : selectedProductIds.length})</Button>}
+                  {canDelete && <Button size="sm" variant="outline" onClick={handleBatchDelete} className="text-destructive border-destructive/20 hover:bg-destructive/5"><Trash2 className="w-4 h-4 mr-1" />批量删除 ({selectAllMode === 'all' ? '全部' : selectedProductIds.length})</Button>}
                 </>
               )}
               <Button size="sm" variant="outline" onClick={() => exportToExcel(filteredProducts, getProductExportColumns(), '产品信息')}>
                 <Download className="w-4 h-4 mr-1" />
                 Excel导出
               </Button>
-              <Button size="sm" variant="outline" onClick={() => setImportDialogOpen(true)}>
-                <Upload className="w-4 h-4 mr-1" />
-                Excel导入
-              </Button>
-              <Button size="sm" className="bg-primary" onClick={handleAdd}>
-                <Plus className="w-4 h-4 mr-1" />
-                新增产品
-              </Button>
+              {canCreate && <Button size="sm" variant="outline" onClick={() => setImportDialogOpen(true)}><Upload className="w-4 h-4 mr-1" />Excel导入</Button>}
+              {canCreate && <Button size="sm" className="bg-primary" onClick={handleAdd}><Plus className="w-4 h-4 mr-1" />新增产品</Button>}
             </div>
           </div>
         </CardHeader>
@@ -728,7 +693,7 @@ const ProductListPage: React.FC = () => {
               columns={columns}
               dataSource={filteredProducts}
               rowKey="id"
-              rowSelection={{
+              rowSelection={(canUpdate || canDelete) ? {
                 type: 'checkbox',
                 selectedRowKeys: selectAllMode === 'all' ? filteredProducts.map(p => p.id) : selectedProductIds,
                 onChange: (selectedRowKeys: React.Key[], selectedRows: IProduct[]) => {
@@ -769,7 +734,7 @@ const ProductListPage: React.FC = () => {
                     },
                   },
                 ],
-              }}
+              } : undefined}
               pagination={{
                 pageSize: 10,
                 showSizeChanger: true,

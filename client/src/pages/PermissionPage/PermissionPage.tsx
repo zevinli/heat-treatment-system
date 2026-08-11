@@ -22,6 +22,7 @@ import {
   FilterGroup,
   FilterSelectContent,
 } from '@/components/ui/filter';
+import { checkPermission, getCurrentUser } from '@/lib/auth-session';
 
 // 权限定义
 const PERMISSIONS = {
@@ -35,8 +36,15 @@ const PERMISSIONS = {
     { key: 'statistics', label: '数据统计', icon: 'BarChart3' },
     { key: 'customers', label: '客户管理', icon: 'Database' },
     { key: 'products', label: '产品管理', icon: 'Package' },
+    { key: 'orders', label: '单据查询', icon: 'FileText' },
     { key: 'templates', label: '打印模板', icon: 'FileSpreadsheet' },
     { key: 'permissions', label: '权限管理', icon: 'Shield' },
+    { key: 'display', label: '显示设置', icon: 'Settings' },
+    { key: 'manual', label: '用户手册', icon: 'FileText' },
+    { key: 'profile', label: '个人资料', icon: 'User' },
+    { key: 'logs', label: '操作日志', icon: 'FileText' },
+    { key: 'featureFlags', label: '实验功能', icon: 'Settings' },
+    { key: 'admin', label: '管理后台', icon: 'Shield' },
   ],
   // 操作权限
   action: [
@@ -73,6 +81,8 @@ interface IUser {
   lastLogin: string;
   deviceLimit: number;
   password?: string;
+  accountRoleId?: string;
+  accountRoleName?: string;
 }
 
 const roleIdToServerRole = (roleId?: string) => roleId === '1'
@@ -113,7 +123,7 @@ const initialRoles: IRole[] = [
     id: '2',
     name: '操作员',
     description: '业务操作与查看，不含权限管理和系统设置',
-    menus: ['dashboard', 'inbound', 'outbound', 'inventory', 'reconciliation', 'statistics', 'customers', 'products'],
+    menus: ['dashboard', 'inbound', 'outbound', 'orders', 'inventory', 'reconciliation', 'statistics', 'customers', 'products', 'display', 'manual', 'profile'],
     actions: ['view', 'create', 'edit', 'delete', 'export', 'print'],
     userCount: 0,
     createdAt: '2024-01-01',
@@ -122,7 +132,7 @@ const initialRoles: IRole[] = [
     id: '4',
     name: '财务人员',
     description: '负责对账和统计',
-    menus: ['dashboard', 'reconciliation', 'statistics', 'customers'],
+    menus: ['dashboard', 'orders', 'reconciliation', 'statistics', 'customers', 'display', 'manual', 'profile'],
     actions: ['view', 'create', 'edit', 'export', 'print', 'approve'],
     userCount: 1,
     createdAt: '2024-01-01',
@@ -131,7 +141,7 @@ const initialRoles: IRole[] = [
     id: '5',
     name: '只读用户',
     description: '仅可使用各业务模块的查看权限',
-    menus: ['dashboard', 'inbound', 'outbound', 'inventory', 'reconciliation', 'statistics', 'customers', 'products'],
+    menus: ['dashboard', 'orders', 'inventory', 'reconciliation', 'statistics', 'customers', 'products', 'display', 'manual', 'profile'],
     actions: ['view'],
     userCount: 0,
     createdAt: '2024-01-01',
@@ -144,50 +154,6 @@ const STORAGE_KEYS = {
   users: 'heat_treatment_users',
   logs: 'heat_treatment_logs',
   currentUser: 'heat_treatment_current_user',
-};
-
-// 权限检查工具
-export const checkPermission = (userRoleId: string, permissionType: 'menu' | 'action', permissionKey: string): boolean => {
-  try {
-    // 角色权限由服务端固定 RBAC 定义；前端不再信任可篡改的本地角色配置。
-    const role = initialRoles.find((r: IRole) => r.id === userRoleId);
-
-    // 如果找不到角色，拒绝访问
-    if (!role) return false;
-
-    // 系统管理员拥有所有权限
-    if (role.id === '1') return true;
-
-    if (permissionType === 'menu') {
-      return role.menus?.includes(permissionKey) || false;
-    }
-    return role.actions?.includes(permissionKey) || false;
-  } catch (error) {
-    logger.error('Permission check error:', error);
-    return false;
-  }
-};
-
-// 获取当前用户
-export const getCurrentUser = (): IUser | null => {
-  const userStr = localStorage.getItem(STORAGE_KEYS.currentUser);
-  return userStr ? JSON.parse(userStr) : null;
-};
-
-// 设置当前用户
-export const setCurrentUser = (user: IUser | null): void => {
-  if (user) {
-    localStorage.setItem(STORAGE_KEYS.currentUser, JSON.stringify(user));
-    localStorage.setItem('userId', user.id);
-    localStorage.setItem('userName', user.name);
-    localStorage.setItem('userRole', String(user.roleId));
-  } else {
-    localStorage.removeItem(STORAGE_KEYS.currentUser);
-    localStorage.removeItem('userId');
-    localStorage.removeItem('userName');
-    localStorage.removeItem('userRole');
-    localStorage.removeItem('authToken');
-  }
 };
 
 const PermissionPage: React.FC = () => {

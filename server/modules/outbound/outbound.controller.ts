@@ -2,8 +2,6 @@ import {
   Controller,
   Get,
   Post,
-  Put,
-  Delete,
   Body,
   Param,
   Query,
@@ -11,10 +9,11 @@ import {
   Logger,
   BadRequestException,
 } from '@nestjs/common';
-import { NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
+import { CanRole, NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
 import type { Request } from 'express';
 import { OutboundService } from './outbound.service';
 import { PAGINATION } from '../../config/constants';
+import { parsePagination } from '../../common/utils/pagination';
 
 @Controller('api/outbound')
 export class OutboundController {
@@ -24,6 +23,7 @@ export class OutboundController {
 
   // 获取所有出库单
   @Get()
+  @CanRole('outbound:view')
   async findAll(
     @Query('customerId') customerId?: string,
     @Query('status') status?: string,
@@ -37,36 +37,42 @@ export class OutboundController {
       ? status as 'active' | 'cancelled' | 'all'
       : 'all';
     
+    const pagination = parsePagination(page, pageSize, {
+      page: PAGINATION.DEFAULT_PAGE, pageSize: PAGINATION.DEFAULT_PAGE_SIZE, maxPageSize: PAGINATION.MAX_PAGE_SIZE,
+    });
     return this.outboundService.findAll({
       customerId,
       status: validStatus,
       startDate,
       endDate,
-      page: page ? parseInt(page, 10) : PAGINATION.DEFAULT_PAGE,
-      pageSize: pageSize ? parseInt(pageSize, 10) : PAGINATION.DEFAULT_PAGE_SIZE,
+      ...pagination,
     });
   }
 
   // 获取待对账的出库单 - 必须放在 :id 路由之前
   @Get('pending/:customerId')
+  @CanRole('outbound:view')
   async getPendingReconciliation(@Param('customerId') customerId: string) {
     return this.outboundService.getPendingReconciliation(customerId);
   }
 
   // 获取出库单操作日志 - 必须放在 :id 路由之前
   @Get(':id/logs')
+  @CanRole('outbound:view')
   async getOperationLogs(@Param('id') id: string) {
     return this.outboundService.getOperationLogs(id);
   }
 
   // 根据ID获取出库单
   @Get(':id')
+  @CanRole('outbound:view')
   async findById(@Param('id') id: string) {
     return this.outboundService.findById(id);
   }
 
   // 创建出库单
   @NeedLogin()
+  @CanRole('outbound:create')
   @Post()
   async create(
     @Body()
@@ -132,28 +138,4 @@ export class OutboundController {
     });
   }
 
-  // 更新状态
-  @NeedLogin()
-  @Put(':id/status')
-  async updateStatus(
-    @Param('id') id: string,
-    @Body('status') status: string,
-  ) {
-    if (!['pending_reconciliation', 'active'].includes(status)) {
-      throw new BadRequestException('不允许的出库状态');
-    }
-    return this.outboundService.updateStatus(id, status);
-  }
-
-  // 撤销出库单
-  @NeedLogin()
-  @Post(':id/cancel')
-  async cancel(
-    @Param('id') id: string,
-    @Req() req: Request,
-    @Body('reason') reason?: string,
-  ) {
-    const { userId } = req.userContext;
-    return this.outboundService.cancel(id, userId, reason);
-  }
 }

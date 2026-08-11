@@ -1,5 +1,5 @@
 import { Injectable, Inject } from '@nestjs/common';
-import { eq, and, gte, lte, sql, desc } from 'drizzle-orm';
+import { eq, and, gte, lt, ne, sql, desc } from 'drizzle-orm';
 import {
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
@@ -14,6 +14,7 @@ import {
   inventoryRecordTable,
   statisticsDailyTable,
 } from '../../database/schema';
+import { parseRangeEndExclusive, parseRangeStart } from '../../common/utils/date-range';
 
 @Injectable()
 export class StatisticsService {
@@ -41,8 +42,8 @@ export class StatisticsService {
       .from(inboundOrderTable)
       .where(and(
         eq(inboundOrderTable.status, 'active'),
-        gte(inboundOrderTable.inboundDate, new Date(startDate)),
-        lte(inboundOrderTable.inboundDate, new Date(endDate)),
+        gte(inboundOrderTable.inboundDate, parseRangeStart(startDate)),
+        lt(inboundOrderTable.inboundDate, parseRangeEndExclusive(endDate)),
       ));
 
     // 出库统计 - 统一使用 status = 'active' 过滤
@@ -55,9 +56,9 @@ export class StatisticsService {
       })
       .from(outboundOrderTable)
       .where(and(
-        eq(outboundOrderTable.status, 'active'),
-        gte(outboundOrderTable.outboundDate, new Date(startDate)),
-        lte(outboundOrderTable.outboundDate, new Date(endDate)),
+        ne(outboundOrderTable.status, 'cancelled'),
+        gte(outboundOrderTable.outboundDate, parseRangeStart(startDate)),
+        lt(outboundOrderTable.outboundDate, parseRangeEndExclusive(endDate)),
       ));
 
     // 当前库存
@@ -101,9 +102,9 @@ export class StatisticsService {
       })
       .from(outboundOrderTable)
       .where(and(
-        eq(outboundOrderTable.status, 'active'),
-        gte(outboundOrderTable.outboundDate, new Date(startDate)),
-        lte(outboundOrderTable.outboundDate, new Date(endDate)),
+        ne(outboundOrderTable.status, 'cancelled'),
+        gte(outboundOrderTable.outboundDate, parseRangeStart(startDate)),
+        lt(outboundOrderTable.outboundDate, parseRangeEndExclusive(endDate)),
       ))
       .groupBy(outboundOrderTable.customerId, outboundOrderTable.customerName, outboundOrderTable.customerCode)
       .orderBy(desc(sql`sum(${outboundOrderTable.totalAmount})`))
@@ -120,8 +121,8 @@ export class StatisticsService {
       .from(inboundOrderTable)
       .where(and(
         eq(inboundOrderTable.status, 'active'),
-        gte(inboundOrderTable.inboundDate, new Date(startDate)),
-        lte(inboundOrderTable.inboundDate, new Date(endDate)),
+        gte(inboundOrderTable.inboundDate, parseRangeStart(startDate)),
+        lt(inboundOrderTable.inboundDate, parseRangeEndExclusive(endDate)),
       ))
       .groupBy(inboundOrderTable.customerId, inboundOrderTable.customerName)
       .orderBy(desc(sql`count(*)`))
@@ -160,9 +161,9 @@ export class StatisticsService {
         eq(outboundDetailTable.outboundId, outboundOrderTable.id)
       )
       .where(and(
-        eq(outboundOrderTable.status, 'active'),
-        gte(outboundOrderTable.outboundDate, new Date(startDate)),
-        lte(outboundOrderTable.outboundDate, new Date(endDate)),
+        ne(outboundOrderTable.status, 'cancelled'),
+        gte(outboundOrderTable.outboundDate, parseRangeStart(startDate)),
+        lt(outboundOrderTable.outboundDate, parseRangeEndExclusive(endDate)),
       ))
       .groupBy(
         outboundDetailTable.productId,
@@ -190,8 +191,8 @@ export class StatisticsService {
       )
       .where(and(
         eq(inboundOrderTable.status, 'active'),
-        gte(inboundOrderTable.inboundDate, new Date(startDate)),
-        lte(inboundOrderTable.inboundDate, new Date(endDate)),
+        gte(inboundOrderTable.inboundDate, parseRangeStart(startDate)),
+        lt(inboundOrderTable.inboundDate, parseRangeEndExclusive(endDate)),
       ))
       .groupBy(
         inboundDetailTable.productId,
@@ -295,8 +296,9 @@ export class StatisticsService {
       })
       .from(outboundOrderTable)
       .where(and(
-        gte(outboundOrderTable.outboundDate, new Date(startDate)),
-        lte(outboundOrderTable.outboundDate, new Date(endDate)),
+        ne(outboundOrderTable.status, 'cancelled'),
+        gte(outboundOrderTable.outboundDate, parseRangeStart(startDate)),
+        lt(outboundOrderTable.outboundDate, parseRangeEndExclusive(endDate)),
       ))
       .groupBy(sql`to_char(${outboundOrderTable.outboundDate}, 'YYYY-MM')`)
       .orderBy(sql`to_char(${outboundOrderTable.outboundDate}, 'YYYY-MM')`);

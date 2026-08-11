@@ -4,6 +4,22 @@ import * as api from '@/api';
 import type { ICustomer, IProduct, IOperationLog, IFeatureConfig } from './mockData';
 import { logger } from '@lark-apaas/client-toolkit/logger';
 
+const PAGE_SIZE = 500;
+
+async function loadAllPages<T>(loader: (page: number, pageSize: number) => Promise<any>): Promise<T[]> {
+  const all: T[] = [];
+  for (let page = 1; page <= 50; page++) {
+    const response = await loader(page, PAGE_SIZE);
+    const items: T[] = Array.isArray(response) ? response : (response?.items || []);
+    all.push(...items);
+    if (Array.isArray(response) || items.length < PAGE_SIZE) return all;
+    const total = Number(response?.total ?? response?.stats?.total);
+    if (Number.isFinite(total) && all.length >= total) return all;
+    if (response?.hasMore === false) return all;
+  }
+  throw new Error('数据量超过25000条，请使用筛选条件缩小范围');
+}
+
 // 重新导出类型
 export type { ICustomer, IProduct, ProductStatus, IOperationLog, IFeatureConfig } from './mockData';
 
@@ -237,25 +253,6 @@ interface DataContextType {
   deleteInventoryRecord: (id: string) => void;
   refreshInventoryRecords: () => Promise<void>;
 
-  // 库存变动方法
-  increaseStock: (params: {
-    productId: string;
-    quantity: number;
-    weight?: number;
-    changeType: 'inbound' | 'manual_increase' | 'inventory_profit' | 'adjustment_increase';
-    referenceNo?: string;
-    operator: string;
-    remark?: string;
-  }) => Promise<void>;
-  decreaseStock: (params: {
-    productId: string;
-    quantity: number;
-    weight?: number;
-    changeType: 'outbound' | 'manual_decrease' | 'inventory_loss' | 'damage' | 'quality_reject' | 'adjustment_decrease';
-    referenceNo?: string;
-    operator: string;
-    remark?: string;
-  }) => Promise<void>;
   getInventorySummary: () => IInventorySummary[];
 
   // 出库单
@@ -428,9 +425,7 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const refreshCustomers = useCallback(async () => {
     try {
       setLoading(true);
-      const response = await api.getCustomers();
-      // API 返回 { items: [...] } 格式，提取数组
-      const data = response.items || [];
+      const data = await loadAllPages<any>((page, pageSize) => api.getCustomers({ page, pageSize }));
       setCustomers(data.map(item => ({
         id: item.id,
         code: item.code,
@@ -457,9 +452,7 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const refreshProducts = useCallback(async () => {
     try {
       setLoading(true);
-      const response = await api.getProducts();
-      // API 返回 { items: [...] } 格式，提取数组
-      const data = response.items || [];
+      const data = await loadAllPages<any>((page, pageSize) => api.getProducts({ page, pageSize }));
       setProducts(data.map(item => ({
         id: item.id,
         code: item.code,
@@ -494,8 +487,7 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   const refreshInventoryRecords = useCallback(async () => {
     try {
-      const response = await api.getInventoryRecords();
-      const data = Array.isArray(response) ? response : response?.items || [];
+      const data = await loadAllPages<IInventoryRecord>((page, pageSize) => api.getInventoryRecords({ page, pageSize }));
       setInventoryRecords(data);
     } catch (error) {
       logger.error('加载库存记录失败', error);
@@ -504,18 +496,25 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   const refreshOutboundOrders = useCallback(async () => {
     try {
-      const response = await api.getOutboundOrders();
-      const data = Array.isArray(response) ? response : response?.items || [];
+      const data = await loadAllPages<IOutboundOrder>((page, pageSize) => api.getOutboundOrders({ page, pageSize }));
       setOutboundOrders(data);
     } catch (error) {
       logger.error('加载出库单失败', error);
     }
   }, []);
 
+  const refreshInboundOrders = useCallback(async () => {
+    try {
+      const data = await loadAllPages<IInboundOrder>((page, pageSize) => api.getInboundOrders({ page, pageSize }));
+      setInboundOrders(data);
+    } catch (error) {
+      logger.error('加载入库单失败', error);
+    }
+  }, []);
+
   const refreshReconciliations = useCallback(async () => {
     try {
-      const response = await api.getReconciliations();
-      const data = Array.isArray(response) ? response : response?.items || [];
+      const data = await loadAllPages<IReconciliation>((page, pageSize) => api.getReconciliations({ page, pageSize }));
       setReconciliations(data);
     } catch (error) {
       logger.error('加载对账单失败', error);
@@ -526,10 +525,11 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   useEffect(() => {
     refreshCustomers();
     refreshProducts();
+    refreshInboundOrders();
     refreshOutboundOrders();
     refreshReconciliations();
     refreshInventoryRecords();
-  }, []);
+  }, [refreshCustomers, refreshProducts, refreshInboundOrders, refreshOutboundOrders, refreshReconciliations, refreshInventoryRecords]);
 
   // ========== 客户管理 ==========
   const addCustomer = useCallback(async (customer: Omit<ICustomer, 'id'>) => {
@@ -636,168 +636,6 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setInventoryRecords(prev => prev.filter(r => r.id !== id));
   }, []);
 
-  // ========== 库存变动方法 ==========
-  const increaseStock = useCallback(async ({
-    productId,
-    quantity,
-    weight,
-    changeType,
-    referenceNo,
-    operator,
-    remark = '',
-  }: {
-    productId: string;
-    quantity: number;
-    weight?: number;
-    changeType: 'inbound' | 'manual_increase' | 'inventory_profit' | 'adjustment_increase';
-    referenceNo?: string;
-    operator: string;
-    remark?: string;
-  }) => {
-    const product = products.find(p => p.id === productId);
-    if (!product) return;
-
-    const beforeStock = product.stock;
-    const afterStock = beforeStock + quantity;
-    const beforeStockWeight = product.stockWeight || 0;
-    // 如果没有提供重量，根据历史平均重量估算
-    const estimatedWeight = weight ?? (product.inboundWeight && product.inboundQuantity 
-      ? (product.inboundWeight / product.inboundQuantity) * quantity 
-      : 0);
-    const afterStockWeight = beforeStockWeight + estimatedWeight;
-
-    try {
-      // 调用API更新数据库中的产品库存
-      await api.updateProduct(productId, {
-        stock: afterStock,
-        stockWeight: afterStockWeight,
-        inboundQuantity: (product.inboundQuantity || 0) + quantity,
-        inboundWeight: (product.inboundWeight || 0) + estimatedWeight,
-      });
-
-      // 更新本地状态
-      setProducts(prev => prev.map(p =>
-        p.id === productId ? { 
-          ...p, 
-          stock: afterStock,
-          stockWeight: afterStockWeight,
-          inboundQuantity: (p.inboundQuantity || 0) + quantity,
-          inboundWeight: (p.inboundWeight || 0) + estimatedWeight,
-        } : p
-      ));
-
-      // 添加库存变动记录（本地）
-      addInventoryRecord({
-        productId,
-        productName: product.name,
-        material: product.material,
-        process: product.process,
-        workpieceNo: product.workpieceNo,
-        unit: product.unit,
-        changeType,
-        quantityChange: quantity,
-        weightChange: estimatedWeight,
-        beforeStock,
-        afterStock,
-        beforeStockWeight,
-        afterStockWeight,
-        referenceNo,
-        customerCode: product.customerCode,
-        customerName: product.customerName,
-        operator,
-        remark,
-      });
-    } catch (error: any) {
-      toast.error(error.message || '入库操作失败');
-      throw error;
-    }
-  }, [products, addInventoryRecord]);
-
-  const decreaseStock = useCallback(async ({
-    productId,
-    quantity,
-    weight,
-    changeType,
-    referenceNo,
-    operator,
-    remark = '',
-  }: {
-    productId: string;
-    quantity: number;
-    weight?: number;
-    changeType: 'outbound' | 'manual_decrease' | 'inventory_loss' | 'damage' | 'quality_reject' | 'adjustment_decrease';
-    referenceNo?: string;
-    operator: string;
-    remark?: string;
-  }) => {
-    const product = products.find(p => p.id === productId);
-    if (!product) return;
-
-    // 按计价单位区分主次校验
-    if (product.unit === '件') {
-      // 按件计价：数量必须充足
-      if (product.stock < quantity) {
-        throw new Error(`库存不足：${product.name} 当前库存 ${product.stock} 件，需要出库 ${quantity} 件`);
-      }
-    } else {
-      // 按kg计价：重量必须充足（如果提供了重量）
-      const checkWeight = weight ?? (product.stockWeight || 0) / (product.stock || 1) * quantity;
-      if ((product.stockWeight || 0) < checkWeight) {
-        throw new Error(`库存不足：${product.name} 当前库存重量 ${(product.stockWeight || 0).toFixed(2)} kg，需要出库 ${checkWeight.toFixed(2)} kg`);
-      }
-    }
-
-    const beforeStock = product.stock;
-    const afterStock = Math.max(0, beforeStock - quantity);
-    const beforeStockWeight = product.stockWeight || 0;
-    // 如果没有提供重量，根据平均重量估算
-    const estimatedWeight = weight ?? (beforeStockWeight / (beforeStock || 1) * quantity);
-    const afterStockWeight = Math.max(0, beforeStockWeight - estimatedWeight);
-
-    try {
-      // 调用API更新数据库中的产品库存
-      // 注意：inboundQuantity/inboundWeight 是累计入库量，出库时不应减少
-      await api.updateProduct(productId, {
-        stock: afterStock,
-        stockWeight: afterStockWeight,
-      });
-
-      // 更新本地状态
-      setProducts(prev => prev.map(p =>
-        p.id === productId ? { 
-          ...p, 
-          stock: afterStock,
-          stockWeight: afterStockWeight,
-        } : p
-      ));
-
-      // 添加库存变动记录（本地）
-      addInventoryRecord({
-        productId,
-        productName: product.name,
-        material: product.material,
-        process: product.process,
-        workpieceNo: product.workpieceNo,
-        unit: product.unit,
-        changeType,
-        quantityChange: -quantity,
-        weightChange: -estimatedWeight,
-        beforeStock,
-        afterStock,
-        beforeStockWeight,
-        afterStockWeight,
-        referenceNo,
-        customerCode: product.customerCode,
-        customerName: product.customerName,
-        operator,
-        remark,
-      });
-    } catch (error: any) {
-      toast.error(error.message || '出库操作失败');
-      throw error;
-    }
-  }, [products, addInventoryRecord]);
-
   // 获取库存汇总
   const getInventorySummary = useCallback((): IInventorySummary[] => {
     return products.map((product) => ({
@@ -845,7 +683,7 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       toast.error(error.message || '创建出库单失败');
       throw error;
     }
-  }, [refreshProducts, refreshInventoryRecords]);
+  }, [refreshInboundOrders, refreshProducts, refreshInventoryRecords]);
 
   const updateOutboundOrder = useCallback(async (id: string, data: Partial<IOutboundOrder>) => {
     setOutboundOrders(prev => prev.map(o => o.id === id ? { ...o, ...data } : o));
@@ -900,8 +738,8 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   const updateReconciliation = useCallback(async (id: string, data: Partial<IReconciliation>) => {
     try {
-      await api.updateReconciliation(id, data);
-      setReconciliations(prev => prev.map(r => r.id === id ? { ...r, ...data } : r));
+      const updated = await api.updateReconciliation(id, data);
+      setReconciliations(prev => prev.map(r => r.id === id ? { ...r, ...updated } : r));
       toast.success('对账单更新成功');
     } catch (error: any) {
       toast.error(error.message || '更新对账单失败');
@@ -909,31 +747,18 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   }, []);
 
-  const deleteReconciliation = useCallback(async (id: string, outboundOrderIds?: string[]) => {
+  const deleteReconciliation = useCallback(async (id: string, _outboundOrderIds?: string[]) => {
     try {
       await api.deleteReconciliation(id);
       setReconciliations(prev => prev.filter(r => r.id !== id));
-      
-      // 将关联的出库单状态回退到待对账，并调用API更新数据库
-      if (outboundOrderIds && outboundOrderIds.length > 0) {
-        await Promise.all(
-          outboundOrderIds.map(async (orderId) => {
-            await api.updateOutboundOrderStatus(orderId, 'pending_reconciliation');
-          })
-        );
-        
-        // 更新本地状态
-        setOutboundOrders(prev => prev.map(o => 
-          outboundOrderIds.includes(o.id) ? { ...o, status: 'pending_reconciliation' as const } : o
-        ));
-      }
-      
+      // 后端在删除事务中统一解除关联和锁定，前端只读取权威结果，避免二次改状态。
+      await refreshOutboundOrders();
       toast.success('对账单删除成功，关联出库单已回退到待对账列表');
     } catch (error: any) {
       toast.error(error.message || '删除对账单失败');
       throw error;
     }
-  }, []);
+  }, [refreshOutboundOrders]);
 
   const auditReconciliation = useCallback(async (id: string, auditorName: string) => {
     try {
@@ -1029,18 +854,20 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       toast.success('入库单创建成功');
       // 从后端返回的数据中构造返回对象
       const orderData = result?.data || result;
-      return { 
-        id: orderData?.id || '', 
-        ...order, 
+      return {
+        ...order,
+        ...orderData,
+        id: orderData?.id || '',
         inboundNo: orderData?.inboundNo || '',
-        status: 'active', 
-        createdAt: orderData?.createdAt || new Date().toISOString() 
+        status: orderData?.status || 'active',
+        details: orderData?.details || order.details,
+        createdAt: orderData?.createdAt || new Date().toISOString(),
       } as IInboundOrder;
     } catch (error: any) {
       toast.error(error.message || '创建入库单失败');
       throw error;
     }
-  }, [refreshProducts, refreshInventoryRecords]);
+  }, [refreshInboundOrders, refreshProducts, refreshInventoryRecords]);
 
   const checkCanUndo = useCallback(async (inboundOrderId: string): Promise<IUndoCheckResult> => {
     try {
@@ -1071,21 +898,7 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       toast.error(error.message || '撤销失败');
       return false;
     }
-  }, [refreshProducts, refreshInventoryRecords]);
-
-  const refreshInboundOrders = useCallback(async () => {
-    setLoading(true);
-    try {
-      const response = await api.getInboundOrders();
-      const data = Array.isArray(response) ? response : response?.items || [];
-      setInboundOrders(data);
-    } catch (error) {
-      logger.error('加载入库单失败', error);
-      toast.error('加载入库单失败');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  }, [refreshInboundOrders, refreshProducts, refreshInventoryRecords]);
 
   // ========== 操作日志相关 ==========
   const addOperationLog = useCallback(async (log: Omit<IOperationLog, 'id' | 'createdAt'>) => {
@@ -1261,8 +1074,6 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         refreshInventoryRecords,
         
         // 库存操作
-        increaseStock,
-        decreaseStock,
         getInventorySummary,
         
         // 出库单

@@ -1,6 +1,6 @@
-import { Injectable, Inject, Logger, BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
-import { BitableSyncService } from '../feishu/bitable-sync.service';
-import { eq, and, gte, lte, desc, asc, sql, isNull, type SQL } from 'drizzle-orm';
+import { Injectable, Inject, Logger, BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { FeishuOutboxService } from '../feishu/feishu-outbox.service';
+import { eq, and, gte, lt, ne, desc, asc, sql, isNull, type SQL } from 'drizzle-orm';
 import {
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
@@ -21,12 +21,14 @@ import {
   inboundDetailTable,
   outboundBatchDetailTable,
   operationLogTable,
+  approvalRequestTable,
   customer,
 } from '../../database/schema';
 import { yuanToCents } from '../../common/utils/currency';
 import { checkUndoable } from '../../common/utils/undo-check.util';
 import { PAGINATION } from '../../config/constants';
-import { getCurrentTenantContext } from '../../common/tenant-context.storage';
+import { parseRangeEndExclusive, parseRangeStart } from '../../common/utils/date-range';
+import { randomUUID } from 'crypto';
 
 export interface OutboundDetailWithBatch {
   productId: string;
@@ -56,13 +58,13 @@ export class OutboundService {
 
   constructor(
     @Inject(TENANT_DATABASE) private readonly db: PostgresJsDatabase,
-    private readonly bitableSyncService?: BitableSyncService,
+    private readonly feishuOutbox: FeishuOutboxService,
   ) {}
 
   // 获取所有出库单
   async findAll(params: {
     customerId?: string;
-    status?: 'active' | 'cancelled' | 'all';
+    status?: 'active' | 'pending_reconciliation' | 'reconciled' | 'cancelled' | 'all';
     startDate?: string;
     endDate?: string;
     page?: number;
@@ -74,7 +76,9 @@ export class OutboundService {
     const conditions: (SQL<unknown> | undefined)[] = [];
     
     // 根据状态筛选（默认返回全部，不再硬编码排除已撤销）
-    if (status && status !== 'all') {
+    if (status === 'active') {
+      conditions.push(ne(outboundOrder.status, 'cancelled'));
+    } else if (status && status !== 'all') {
       conditions.push(eq(outboundOrder.status, status));
     }
     
@@ -82,10 +86,10 @@ export class OutboundService {
       conditions.push(eq(outboundOrder.customerId, customerId));
     }
     if (startDate) {
-      conditions.push(gte(outboundOrder.outboundDate, new Date(startDate)));
+      conditions.push(gte(outboundOrder.outboundDate, parseRangeStart(startDate)));
     }
     if (endDate) {
-      conditions.push(lte(outboundOrder.outboundDate, new Date(endDate)));
+      conditions.push(lt(outboundOrder.outboundDate, parseRangeEndExclusive(endDate)));
     }
     if (keyword?.trim()) {
       const searchPattern = `%${keyword.trim()}%`;
@@ -110,7 +114,7 @@ export class OutboundService {
     const statsQuery = this.db
       .select({
         total: sql<number>`count(*)::int`,
-        active: sql<number>`count(*) FILTER (WHERE ${outboundOrder.status} = 'active')::int`,
+        active: sql<number>`count(*) FILTER (WHERE ${outboundOrder.status} <> 'cancelled')::int`,
         cancelled: sql<number>`count(*) FILTER (WHERE ${outboundOrder.status} = 'cancelled')::int`,
       })
       .from(outboundOrder)
@@ -154,29 +158,10 @@ export class OutboundService {
 
   // 创建出库单 - 带批次扣减和库存更新
   // 生成出库单号
-  private async generateOutboundNo(): Promise<string> {
+  private generateOutboundNo(): string {
     const today = new Date();
     const dateStr = today.toISOString().slice(2, 10).replace(/-/g, ''); // 格式：YYMMDD
-    const prefix = `CK${dateStr}`;
-    
-    // 查询当天已有的出库单数量
-    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
-    
-    const countResult = await this.db
-      .select({ count: sql<number>`count(*)` })
-      .from(outboundOrder)
-      .where(
-        and(
-          sql`${outboundOrder.createdAt} >= ${startOfDay.toISOString()}`,
-          sql`${outboundOrder.createdAt} < ${endOfDay.toISOString()}`
-        )
-      );
-    
-    const sequence = (countResult[0]?.count || 0) + 1;
-    const sequenceStr = sequence.toString().padStart(3, '0');
-    
-    return `${prefix}${sequenceStr}`;
+    return `CK${dateStr}${randomUUID().replace(/-/g, '').slice(0, 6).toUpperCase()}`;
   }
 
   async create(data: {
@@ -267,6 +252,10 @@ export class OutboundService {
         amount: Math.round(unitPrice * billingQuantity * 100) / 100,
       };
     }));
+    const productIds = details.map(detail => detail.productId);
+    if (new Set(productIds).size !== productIds.length) {
+      throw new BadRequestException('同一出库单不能重复添加同一产品，请合并数量、重量和批次');
+    }
 
     // 数量、重量、金额均从经过主数据校正的服务端明细汇总。
     const totalAmount = details.reduce((sum, d) => sum + d.amount, 0);
@@ -274,7 +263,7 @@ export class OutboundService {
     const totalWeight = details.reduce((sum, d) => sum + d.weight, 0);
 
     // 自动生成或验证出库单号
-    const outboundNo = data.outboundNo || await this.generateOutboundNo();
+    const outboundNo = data.outboundNo || this.generateOutboundNo();
     
     // 检查出库单号是否已存在
     const existingOrder = await this.db
@@ -376,6 +365,16 @@ export class OutboundService {
           operator: createdOrder.creator || 'system',
           remark: detail.closeOrder ? '出库并关单，剩余库存继续留存' : '出库单创建，扣减库存',
         });
+        await this.feishuOutbox.enqueue(tx, 'outbound', `${createdOrder.id}:${createdDetail.id}`, {
+          orderId: createdOrder.outboundNo,
+          customerName: customerRecord.name,
+          productName: productRecord.name,
+          quantity: detail.quantity,
+          weight: detail.weight,
+          batchNo: selections.map(item => item.batchNo).join(','),
+          createdAt: data.outboundDate,
+          status: '待对账',
+        });
       }
 
       await tx.insert(operationLogTable).values({
@@ -396,19 +395,6 @@ export class OutboundService {
       });
       return createdOrder;
     });
-
-    // 同步到飞书多维表格（异步，不阻塞主流程）
-    this.syncToFeishuOutbound(order, {
-      ...data,
-      customerName: customerRecord.name,
-      customerCode: customerRecord.code,
-      details,
-      totalAmount,
-      totalQuantity,
-      totalWeight,
-    }).catch(err =>
-      this.logger.warn(`飞书同步发货记录失败：${err.message}`),
-    );
 
     return this.findById(order.id);
   }
@@ -681,16 +667,6 @@ export class OutboundService {
     return ordersWithDetails;
   }
 
-  // 更新出库单状态
-  async updateStatus(id: string, status: string) {
-    const result = await this.db
-      .update(outboundOrder)
-      .set({ status })
-      .where(eq(outboundOrder.id, id))
-      .returning();
-    return result[0] || null;
-  }
-
   // 删除出库单 - 带对账检查、乐观锁、撤销日志、批次库存恢复
   async delete(id: string, operatorId?: string, reason?: string) {
     // 先获取出库单信息
@@ -761,7 +737,7 @@ export class OutboundService {
   /**
    * 取消出库单 - 与入库撤销保持一致
    */
-  async cancel(id: string, operatorId: string, reason?: string) {
+  async cancel(id: string, operatorId: string, reason?: string, allowAny = false, approvedOverride = false) {
     // 前置检查（事务外）
     const order = await this.findById(id);
     if (!order) {
@@ -772,6 +748,9 @@ export class OutboundService {
     if (order.cancelledAt) {
       throw new BadRequestException('该出库单已撤销');
     }
+    if (!allowAny && order.creator !== operatorId) {
+      throw new ForbiddenException('普通操作员只能撤销自己创建的出库单');
+    }
 
     // 检查是否已参与对账
     if (order.lockStatus === 'locked' || order.reconciliationId) {
@@ -779,7 +758,16 @@ export class OutboundService {
     }
 
     // 使用统一工具函数检查撤销时限
-    const timeCheck = checkUndoable(order.createdAt, false);
+    const [approvedRequest] = approvedOverride ? [{ id: 'approval-override' }] : await this.db
+      .select({ id: approvalRequestTable.id })
+      .from(approvalRequestTable)
+      .where(and(
+        eq(approvalRequestTable.entityId, id),
+        eq(approvalRequestTable.type, 'outbound_undo'),
+        eq(approvalRequestTable.status, 'approved'),
+      ))
+      .limit(1);
+    const timeCheck = checkUndoable(order.createdAt, Boolean(approvedRequest));
     if (!timeCheck.canUndo) {
       throw new BadRequestException(timeCheck.reason);
     }
@@ -794,7 +782,12 @@ export class OutboundService {
           cancelledAt: new Date(),
           cancelReason: reason || '用户撤销',
         })
-        .where(eq(outboundOrder.id, id))
+        .where(and(
+          eq(outboundOrder.id, id),
+          ne(outboundOrder.status, 'cancelled'),
+          eq(outboundOrder.lockStatus, 'unlocked'),
+          isNull(outboundOrder.reconciliationId),
+        ))
         .returning();
 
       if (!updatedOrder) {
@@ -815,6 +808,16 @@ export class OutboundService {
           referenceNo: order.outboundNo,
           operator: operatorId,
           remark: '出库单撤销，库存回滚',
+        });
+        await this.feishuOutbox.enqueue(tx, 'outbound', `${order.id}:${detail.id}`, {
+          orderId: order.outboundNo,
+          customerName: order.customerName,
+          productName: detail.productName,
+          quantity: detail.quantity,
+          weight: detail.weight || 0,
+          batchNo: detail.batchNo || '',
+          createdAt: order.outboundDate,
+          status: '已取消',
         });
       }
 
@@ -1026,13 +1029,13 @@ export class OutboundService {
 
   // 获取出库单统计
   async getStats(startDate?: string, endDate?: string) {
-    const conditions = [eq(outboundOrder.status, 'active')];
+    const conditions = [ne(outboundOrder.status, 'cancelled')];
     
     if (startDate) {
-      conditions.push(sql`${outboundOrder.outboundDate} >= ${new Date(startDate)}`);
+      conditions.push(sql`${outboundOrder.outboundDate} >= ${parseRangeStart(startDate)}`);
     }
     if (endDate) {
-      conditions.push(sql`${outboundOrder.outboundDate} <= ${new Date(endDate)}`);
+      conditions.push(sql`${outboundOrder.outboundDate} < ${parseRangeEndExclusive(endDate)}`);
     }
 
     const whereClause = conditions.length > 1 ? and(...conditions) : conditions[0];
@@ -1064,20 +1067,4 @@ export class OutboundService {
     return logs;
   }
 
-  private async syncToFeishuOutbound(order: any, data: any) {
-    if (!this.bitableSyncService) return;
-    const orgCode = getCurrentTenantContext()?.orgCode;
-    for (const detail of data.details) {
-      await this.bitableSyncService.syncOutbound({
-        orderId: order.outboundNo,
-        customerName: data.customerName,
-        productName: detail.productName,
-        quantity: detail.quantity,
-        weight: detail.weight,
-        batchNo: detail.batchNo || detail.batchSelections?.map((b: any) => b.batchNo).join(',') || '',
-        createdAt: data.outboundDate,
-        status: '部分发货',
-      }, orgCode);
-    }
-  }
 }

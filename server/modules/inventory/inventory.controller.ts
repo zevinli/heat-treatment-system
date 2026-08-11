@@ -4,6 +4,7 @@ import { CanRole, NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
 import type { Request } from 'express';
 import { InventoryService } from './inventory.service';
 import { PAGINATION } from '../../config/constants';
+import { parsePagination } from '../../common/utils/pagination';
 
 @Controller('api/inventory')
 export class InventoryController {
@@ -21,13 +22,15 @@ export class InventoryController {
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
+    const pagination = parsePagination(page, pageSize, {
+      page: PAGINATION.DEFAULT_PAGE, pageSize: PAGINATION.DEFAULT_PAGE_SIZE, maxPageSize: PAGINATION.MAX_PAGE_SIZE,
+    });
     return this.inventoryService.getInventorySummary({
       search,
       customerCode,
       material,
       minStock: minStock ? parseInt(minStock, 10) : undefined,
-      page: page ? parseInt(page, 10) : PAGINATION.DEFAULT_PAGE,
-      pageSize: pageSize ? parseInt(pageSize, 10) : PAGINATION.DEFAULT_PAGE_SIZE,
+      ...pagination,
     });
   }
 
@@ -41,13 +44,15 @@ export class InventoryController {
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
+    const pagination = parsePagination(page, pageSize, {
+      page: PAGINATION.DEFAULT_PAGE, pageSize: PAGINATION.DEFAULT_PAGE_SIZE, maxPageSize: PAGINATION.MAX_PAGE_SIZE,
+    });
     return this.inventoryService.getInventoryRecords({
       productId,
       changeType: changeType as InventoryChangeType,
       startDate,
       endDate,
-      page: page ? parseInt(page, 10) : PAGINATION.DEFAULT_PAGE,
-      pageSize: pageSize ? parseInt(pageSize, 10) : PAGINATION.DEFAULT_PAGE_SIZE,
+      ...pagination,
     });
   }
 

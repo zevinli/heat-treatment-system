@@ -1,5 +1,5 @@
 import { Injectable, Inject } from '@nestjs/common';
-import { eq, and, gte, lte, sql, desc, ne } from 'drizzle-orm';
+import { eq, and, gte, lte, sql, desc, ne, inArray } from 'drizzle-orm';
 import {
   type PostgresJsDatabase,
 } from '@lark-apaas/fullstack-nestjs-core';
@@ -79,7 +79,7 @@ export class AdminService {
         lt(inboundOrderTable.inboundDate, startDate),
       ));
 
-    // 当前周期出库统计 - 统一使用 status = 'active' 过滤
+    // 出库状态会随对账、开票、回款推进，只排除已撤销单据。
     const currentOutbound = await this.db
       .select({
         count: sql<number>`count(*)`,
@@ -89,12 +89,12 @@ export class AdminService {
       })
       .from(outboundOrderTable)
       .where(and(
-        eq(outboundOrderTable.status, 'active'),
+        ne(outboundOrderTable.status, 'cancelled'),
         gte(outboundOrderTable.outboundDate, startDate),
         lte(outboundOrderTable.outboundDate, endDate),
       ));
 
-    // 上一周期出库统计 - 统一使用 status = 'active' 过滤
+    // 上一周期出库统计
     const prevOutbound = await this.db
       .select({
         count: sql<number>`count(*)`,
@@ -104,7 +104,7 @@ export class AdminService {
       })
       .from(outboundOrderTable)
       .where(and(
-        eq(outboundOrderTable.status, 'active'),
+        ne(outboundOrderTable.status, 'cancelled'),
         gte(outboundOrderTable.outboundDate, prevPeriodStart),
         lte(outboundOrderTable.outboundDate, startDate),
       ));
@@ -131,16 +131,13 @@ export class AdminService {
       .from(customer)
       .where(sql`${customer.deletedAt} IS NULL`);
 
-    // 待对账数量 - 添加 status = 'active' 过滤
+    // 待对账数量
     const pendingReconciliation = await this.db
       .select({
         count: sql<number>`count(*)`,
       })
       .from(outboundOrderTable)
-      .where(and(
-        eq(outboundOrderTable.status, 'pending_reconciliation'),
-        eq(outboundOrderTable.status, 'active'),
-      ));
+      .where(eq(outboundOrderTable.status, 'pending_reconciliation'));
 
     // 待回款金额
     const pendingReceipt = await this.db
@@ -150,7 +147,7 @@ export class AdminService {
       })
       .from(reconciliationTable)
       .where(and(
-        ne(reconciliationTable.status, 'paid'),
+        inArray(reconciliationTable.status, ['invoiced', 'partial_paid']),
         sql`${reconciliationTable.unreceivedAmount} > 0`,
       ));
 
@@ -378,7 +375,7 @@ export class AdminService {
       })
       .from(reconciliationTable)
       .where(and(
-        ne(reconciliationTable.status, 'paid'),
+        inArray(reconciliationTable.status, ['invoiced', 'partial_paid']),
         sql`${reconciliationTable.unreceivedAmount} > 0`,
       ));
 

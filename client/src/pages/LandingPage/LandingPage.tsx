@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { motion, useAnimation, useInView } from 'framer-motion';
 import { Link, useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
@@ -22,7 +23,14 @@ import {
   Box,
   TrendingUp,
 } from 'lucide-react';
-import { UniversalLink } from '@lark-apaas/client-toolkit/components/UniversalLink';
+import { getCurrentUser } from '@/lib/auth-session';
+
+function getSystemEntryPath(): string {
+  const token = localStorage.getItem('authToken');
+  const user = getCurrentUser();
+  if (!token || !user) return '/login';
+  return localStorage.getItem('currentOrgCode') ? '/dashboard' : '/organizations';
+}
 // ==================== 着色器背景组件 ====================
 interface ShaderBackgroundProps {
   className?: string;
@@ -235,16 +243,16 @@ function Navbar() {
           </Link>
           <nav className="hidden items-center space-x-8 md:flex">
             {navigationItems.map((item) => (
-              <UniversalLink
+              <a
                 key={item.title}
-                to={item.href}
+                href={item.href}
                 className={cn(
                   'text-sm font-medium transition-colors hover:text-blue-400',
                   isScrolled ? 'text-foreground/80' : 'text-white/90'
                 )}
               >
                 {item.title}
-              </UniversalLink>
+              </a>
             ))}
           </nav>
           <div className="flex items-center gap-3">
@@ -260,7 +268,7 @@ function Navbar() {
             </Button>
             <Button
               className="hidden rounded-lg bg-blue-500 hover:bg-blue-600 md:flex"
-              onClick={() => navigate('/')}
+              onClick={() => navigate(getSystemEntryPath())}
             >
               进入系统 <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
@@ -286,20 +294,20 @@ function Navbar() {
         >
           <div className="space-y-1 px-4 py-4">
             {navigationItems.map((item) => (
-              <UniversalLink
+              <a
                 key={item.title}
-                to={item.href}
+                href={item.href}
                 className="block rounded-lg px-3 py-2 text-base font-medium text-foreground hover:bg-accent"
                 onClick={() => setMobileMenuOpen(false)}
               >
                 {item.title}
-              </UniversalLink>
+              </a>
             ))}
             <div className="mt-4 flex flex-col gap-2">
               <Button variant="outline" className="w-full" onClick={() => navigate('/login')}>
                 登录
               </Button>
-              <Button className="w-full" onClick={() => navigate('/')}>
+              <Button className="w-full" onClick={() => navigate(getSystemEntryPath())}>
                 进入系统
               </Button>
             </div>
@@ -326,7 +334,7 @@ function HeroSection() {
           className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-4 py-2 backdrop-blur-sm"
         >
           <span className="flex h-2 w-2 rounded-full bg-green-400 animate-pulse" />
-          <span className="text-sm text-white/90">系统运行正常 · 已处理 50,000+ 订单</span>
+          <span className="text-sm text-white/90">收发货、库存、对账与飞书同步一体化</span>
         </motion.div>
         <motion.h1
           initial={{ filter: 'blur(10px)', opacity: 0, y: 50 }}
@@ -355,8 +363,7 @@ function HeroSection() {
           transition={{ delay: 0.9, duration: 0.6 }}
           className="mx-auto mt-8 max-w-2xl text-lg text-white/80 sm:text-xl"
         >
-          专为热处理行业打造的数字化管理平台，实现收发货、库存、对账全流程智能化，
-          <span className="text-blue-300">提升效率 300%</span>，降低误差至 <span className="text-blue-300">0.01%</span>
+          专为热处理现场打造的数字化管理平台，将收发货、批次库存、对账回款和飞书多维表格连接为可追溯的业务闭环。
         </motion.p>
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -367,9 +374,9 @@ function HeroSection() {
           <Button
             size="lg"
             className="h-12 rounded-xl bg-blue-500 px-8 text-base hover:bg-blue-600"
-            onClick={() => navigate('/')}
+            onClick={() => navigate(getSystemEntryPath())}
           >
-            免费开始使用 <ArrowRight className="ml-2 h-5 w-5" />
+            进入系统 <ArrowRight className="ml-2 h-5 w-5" />
           </Button>
           <Button
             size="lg"
@@ -436,7 +443,7 @@ const features = [
   {
     icon: Zap,
     title: '三步快速操作',
-    description: '选客户 → 选产品 → 录数据，三步完成收发货，现场作业效率提升 3 倍',
+    description: '选客户 → 选产品 → 录数据，三步完成收发货，减少现场录入步骤',
     color: 'from-amber-500 to-orange-500',
   },
   {
@@ -520,28 +527,28 @@ const modules = [
     description: '移动端快速收货录入，支持扫码、拍照、批量导入，现场打印流程卡',
     icon: Package,
     href: '/inbound',
-    stats: '平均 2 分钟/单',
+    stats: '三步登记流程',
   },
   {
     title: '快速发货',
     description: '智能批次推荐，灵活分批发货，支持部分发货和关单平账',
     icon: Truck,
     href: '/outbound',
-    stats: '效率提升 300%',
+    stats: '按批次扣减库存',
   },
   {
     title: '库存管理',
     description: '实时库存状态，超期预警提醒，批次追踪，库位管理',
     icon: Box,
     href: '/inventory',
-    stats: '准确率达 99.9%',
+    stats: '批次级库存快照',
   },
   {
     title: '智能对账',
     description: '自动核对差异，一键生成对账单，开票回款全流程跟踪',
     icon: FileText,
     href: '/reconciliation',
-    stats: '对账时间缩短 80%',
+    stats: '开票回款闭环',
   },
 ];
 function ModulesSection() {
@@ -603,10 +610,10 @@ function StatsSection() {
   const ref = useRef(null);
   const isInView = useInView(ref, { once: true, amount: 0.3 });
   const stats = [
-    { value: '50,000+', label: '处理订单', suffix: '' },
-    { value: '99.9', label: '数据准确率', suffix: '%' },
-    { value: '300', label: '效率提升', suffix: '%' },
-    { value: '500+', label: '合作企业', suffix: '' },
+    { value: '3', label: '核心业务步骤', suffix: '步' },
+    { value: '5+2', label: '飞书同步表＋预留表', suffix: '张' },
+    { value: '4', label: '预置业务角色', suffix: '类' },
+    { value: '1', label: '组织独立上下文', suffix: '套' },
   ];
   return (
     <section id="analytics" className="py-24 bg-background">
@@ -694,15 +701,15 @@ function CTASection() {
             准备好提升您的业务效率了吗？
           </h2>
           <p className="mx-auto mt-4 max-w-2xl text-lg text-muted-foreground">
-            立即开始使用，享受 30 天免费试用，无需信用卡
+            使用已有账号登录，或创建组织后开始配置业务数据
           </p>
           <div className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
             <Button
               size="lg"
               className="h-12 rounded-xl bg-blue-500 px-8 text-base hover:bg-blue-600"
-              onClick={() => navigate('/')}
+              onClick={() => navigate(getSystemEntryPath())}
             >
-              免费开始使用 <ArrowRight className="ml-2 h-5 w-5" />
+              进入系统 <ArrowRight className="ml-2 h-5 w-5" />
             </Button>
             <Button
               size="lg"
@@ -716,15 +723,15 @@ function CTASection() {
           <div className="mt-12 flex flex-wrap items-center justify-center gap-8 text-sm text-muted-foreground">
             <div className="flex items-center gap-2">
               <CheckCircle2 className="h-4 w-4 text-green-500" />
-              <span>30天免费试用</span>
+              <span>多租户数据隔离</span>
             </div>
             <div className="flex items-center gap-2">
               <CheckCircle2 className="h-4 w-4 text-green-500" />
-              <span>无需信用卡</span>
+              <span>飞书失败自动重试</span>
             </div>
             <div className="flex items-center gap-2">
               <CheckCircle2 className="h-4 w-4 text-green-500" />
-              <span>7×24小时支持</span>
+              <span>关键操作日志追溯</span>
             </div>
           </div>
         </motion.div>
@@ -735,6 +742,7 @@ function CTASection() {
 // ==================== Footer ====================
 function Footer() {
   const navigate = useNavigate();
+  const [infoDialog, setInfoDialog] = useState<'privacy' | 'terms' | 'contact' | null>(null);
   const footerLinks = {
     产品功能: [
       { label: '来货登记', href: '/inbound' },
@@ -784,7 +792,7 @@ function Footer() {
                 {links.map((link) => (
                   <li key={link.label}>
                     <button
-                      onClick={() => navigate(link.href)}
+                      onClick={() => link.href === '#' ? setInfoDialog('contact') : navigate(link.href)}
                       className="text-sm text-muted-foreground transition-colors hover:text-foreground"
                     >
                       {link.label}
@@ -797,21 +805,37 @@ function Footer() {
         </div>
         <div className="mt-12 flex flex-col items-center justify-between gap-4 border-t pt-8 sm:flex-row">
           <p className="text-sm text-muted-foreground">
-            2024 热处理管理系统. All rights reserved.
+            2026 热处理管理系统. All rights reserved.
           </p>
           <div className="flex items-center gap-6">
-            <button className="text-sm text-muted-foreground transition-colors hover:text-foreground">
+            <button onClick={() => setInfoDialog('privacy')} className="text-sm text-muted-foreground transition-colors hover:text-foreground">
               隐私政策
             </button>
-            <button className="text-sm text-muted-foreground transition-colors hover:text-foreground">
+            <button onClick={() => setInfoDialog('terms')} className="text-sm text-muted-foreground transition-colors hover:text-foreground">
               服务条款
             </button>
-            <button className="text-sm text-muted-foreground transition-colors hover:text-foreground">
+            <button onClick={() => setInfoDialog('contact')} className="text-sm text-muted-foreground transition-colors hover:text-foreground">
               联系我们
             </button>
           </div>
         </div>
       </div>
+      <Dialog open={infoDialog !== null} onOpenChange={(open) => !open && setInfoDialog(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {infoDialog === 'privacy' ? '隐私政策' : infoDialog === 'terms' ? '服务条款' : '联系我们'}
+            </DialogTitle>
+            <DialogDescription className="pt-3 text-left leading-6">
+              {infoDialog === 'privacy'
+                ? '系统仅在业务处理和安全审计所需范围内保存账号、组织及业务数据。数据按组织隔离，具体保留期限和导出/删除要求由企业管理员配置。'
+                : infoDialog === 'terms'
+                  ? '请仅使用本人账号处理已获授权的组织数据。涉及作废、库存调整、对账审核等关键操作会记录审计日志，正式使用规则以所属企业的管理制度为准。'
+                  : '如需开通账号、创建组织、配置飞书多维表格或反馈故障，请联系所属企业的系统管理员。'}
+            </DialogDescription>
+          </DialogHeader>
+        </DialogContent>
+      </Dialog>
     </footer>
   );
 }

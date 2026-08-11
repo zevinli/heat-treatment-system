@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 import { toast } from 'sonner';
-import { checkPermission, getCurrentUser } from '@/pages/PermissionPage/PermissionPage';
+import { checkPermission, getCurrentUser } from '@/lib/auth-session';
 import { Loader2 } from 'lucide-react';
 
 interface PermissionGuardProps {
   children: React.ReactNode;
   requiredPermission?: string;
+  platformOnly?: boolean;
   fallback?: React.ReactNode;
 }
 
@@ -14,6 +15,7 @@ interface PermissionGuardProps {
 export const PermissionGuard: React.FC<PermissionGuardProps> = ({
   children,
   requiredPermission,
+  platformOnly = false,
   fallback,
 }) => {
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
@@ -24,10 +26,17 @@ export const PermissionGuard: React.FC<PermissionGuardProps> = ({
     const checkAccess = () => {
       const user = getCurrentUser();
 
-      // 如果没有当前用户，使用默认管理员（演示模式）
+      // 受保护页面没有有效用户时默认拒绝，不能回退为“演示管理员”。
       if (!user) {
-        setHasPermission(true);
+        setHasPermission(false);
         setIsLoading(false);
+        return;
+      }
+
+      if (platformOnly && user.accountRoleId !== '1') {
+        setHasPermission(false);
+        setIsLoading(false);
+        toast.error('仅平台管理员可访问全局账号管理');
         return;
       }
 
@@ -49,7 +58,7 @@ export const PermissionGuard: React.FC<PermissionGuardProps> = ({
     };
 
     checkAccess();
-  }, [requiredPermission, location.pathname]);
+  }, [requiredPermission, platformOnly, location.pathname]);
 
   if (isLoading) {
     return (
@@ -63,7 +72,7 @@ export const PermissionGuard: React.FC<PermissionGuardProps> = ({
     if (fallback) {
       return <>{fallback}</>;
     }
-    return <Navigate to="/" replace />;
+    return <Navigate to="/dashboard" replace />;
   }
 
   return <>{children}</>;
@@ -81,12 +90,12 @@ export const ActionPermission: React.FC<ActionPermissionProps> = ({
   action,
   fallback,
 }) => {
-  const [hasPermission, setHasPermission] = useState<boolean>(true);
+  const [hasPermission, setHasPermission] = useState<boolean>(false);
 
   useEffect(() => {
     const user = getCurrentUser();
     if (!user) {
-      setHasPermission(true);
+      setHasPermission(false);
       return;
     }
     const permitted = checkPermission(user.roleId, 'action', action);
@@ -102,12 +111,12 @@ export const ActionPermission: React.FC<ActionPermissionProps> = ({
 
 // 菜单权限检查钩子
 export const useMenuPermission = (menuKey: string): boolean => {
-  const [hasPermission, setHasPermission] = useState(true);
+  const [hasPermission, setHasPermission] = useState(false);
 
   useEffect(() => {
     const user = getCurrentUser();
     if (!user) {
-      setHasPermission(true);
+      setHasPermission(false);
       return;
     }
     const permitted = checkPermission(user.roleId, 'menu', menuKey);
@@ -119,12 +128,12 @@ export const useMenuPermission = (menuKey: string): boolean => {
 
 // 操作权限检查钩子
 export const useActionPermission = (actionKey: string): boolean => {
-  const [hasPermission, setHasPermission] = useState(true);
+  const [hasPermission, setHasPermission] = useState(false);
 
   useEffect(() => {
     const user = getCurrentUser();
     if (!user) {
-      setHasPermission(true);
+      setHasPermission(false);
       return;
     }
     const permitted = checkPermission(user.roleId, 'action', actionKey);

@@ -15,6 +15,7 @@ import {
   SidebarMenuSubItem,
   SidebarProvider,
   SidebarRail,
+  SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
 import {
@@ -84,6 +85,7 @@ import {
   Command,
   ExternalLink,
   SwitchCamera,
+  Cloud,
 } from "lucide-react";
 import { useCurrentUserProfile } from "@lark-apaas/client-toolkit/hooks/useCurrentUserProfile";
 import { axiosForBackend } from "@lark-apaas/client-toolkit/utils/getAxiosForBackend";
@@ -97,6 +99,7 @@ import { DataProvider } from "@/data/DataContext";
 import { useData } from "@/data/DataContext";
 import { useTenant } from "@/contexts/TenantContext";
 import { FeishuContextButton, FeishuGlobalDropdown } from "@/components/FeishuLinkButton";
+import { checkPermission, restoreAccountRole } from '@/lib/auth-session';
 
 // ==================== 导航配置 - 优化后的扁平结构 ====================
 
@@ -106,6 +109,8 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>;
   badge?: string | number;
   children?: NavItem[];
+  adminOnly?: boolean;
+  platformOnly?: boolean;
 }
 
 // 主导航项
@@ -139,16 +144,20 @@ const systemNavItems: NavItem[] = [
     path: "/admin",
     label: "管理后台",
     icon: LayoutDashboard,
+    adminOnly: true,
   },
   {
     path: "/settings",
     label: "系统设置",
     icon: Settings,
     children: [
-      { path: "/settings/templates", label: "打印模板", icon: FileSpreadsheet },
-      { path: "/settings/permissions", label: "权限管理", icon: Shield },
-      { path: "/operation-logs", label: "操作日志", icon: History },
-      { path: "/settings/feature-flags", label: "实验功能", icon: FlaskConical },
+      { path: "/settings/templates", label: "打印模板", icon: FileSpreadsheet, adminOnly: true },
+      { path: "/settings/feishu", label: "飞书同步", icon: Cloud, adminOnly: true },
+      { path: "/tenant/manage", label: "组织与成员", icon: Building2, adminOnly: true },
+      { path: "/settings/permissions", label: "平台账号", icon: Shield, adminOnly: true, platformOnly: true },
+      { path: "/operation-logs", label: "操作日志", icon: History, adminOnly: true },
+      { path: "/settings/feature-flags", label: "实验功能", icon: FlaskConical, adminOnly: true },
+      { path: "/settings/display", label: "显示设置", icon: Settings },
       { path: "/settings/manual", label: "用户手册", icon: BookOpen },
     ]
   },
@@ -158,12 +167,13 @@ const systemNavItems: NavItem[] = [
 
 // Logo组件 - 简约现代风格
 const AppLogo = () => {
-  const { state } = useSidebar();
+  const { state, isMobile, setOpenMobile } = useSidebar();
   const { currentTenant } = useTenant();
   
   return (
     <Link 
-      to="/" 
+      to="/dashboard"
+      onClick={() => isMobile && setOpenMobile(false)}
       className={cn(
         "flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200",
         "hover:bg-accent/50 active:scale-[0.98]"
@@ -194,30 +204,37 @@ const SimpleNavItem = ({
 }: { 
   item: NavItem; 
   isActive: boolean;
-}) => (
-  <SidebarMenuItem>
-    <SidebarMenuButton
-      asChild
-      isActive={isActive}
-      tooltip={item.label}
-      className={cn(
-        "h-10 px-3 rounded-lg transition-all duration-200",
-        "hover:bg-accent",
-        isActive && "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground"
-      )}
-    >
-      <Link to={item.path} className="flex items-center gap-3">
-        <item.icon className={cn("size-4.5", isActive ? "text-primary-foreground" : "text-muted-foreground")} />
-        <span className="font-medium">{item.label}</span>
-        {item.badge && (
-          <Badge variant={isActive ? "outline" : "secondary"} className="ml-auto text-[10px] px-1.5 py-0 h-5">
-            {item.badge}
-          </Badge>
+}) => {
+  const { isMobile, setOpenMobile } = useSidebar();
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        asChild
+        isActive={isActive}
+        tooltip={item.label}
+        className={cn(
+          "h-10 px-3 rounded-lg transition-all duration-200",
+          "hover:bg-accent",
+          isActive && "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground"
         )}
-      </Link>
-    </SidebarMenuButton>
-  </SidebarMenuItem>
-);
+      >
+        <Link
+          to={item.path}
+          className="flex items-center gap-3"
+          onClick={() => isMobile && setOpenMobile(false)}
+        >
+          <item.icon className={cn("size-4.5", isActive ? "text-primary-foreground" : "text-muted-foreground")} />
+          <span className="font-medium">{item.label}</span>
+          {item.badge && (
+            <Badge variant={isActive ? "outline" : "secondary"} className="ml-auto text-[10px] px-1.5 py-0 h-5">
+              {item.badge}
+            </Badge>
+          )}
+        </Link>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  );
+};
 
 // 带子菜单的导航项 - 优化版
 const CollapsibleNavItem = ({
@@ -232,6 +249,7 @@ const CollapsibleNavItem = ({
   );
   const isActive = pathname === item.path || isChildActive;
   const [isOpen, setIsOpen] = useState(isActive);
+  const { isMobile, setOpenMobile } = useSidebar();
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
@@ -276,7 +294,11 @@ const CollapsibleNavItem = ({
                       isChildActive && "bg-primary/5 text-primary font-medium"
                     )}
                   >
-                    <Link to={child.path} className="flex items-center gap-2">
+                    <Link
+                      to={child.path}
+                      className="flex items-center gap-2"
+                      onClick={() => isMobile && setOpenMobile(false)}
+                    >
                       <child.icon className="size-4" />
                       <span className="text-sm">{child.label}</span>
                     </Link>
@@ -335,6 +357,7 @@ const UserMenu = () => {
 
   const handleSwitchOrg = () => {
     clearTenant();
+    restoreAccountRole();
     navigate('/organizations');
   };
 
@@ -398,6 +421,47 @@ const UserMenu = () => {
 // 侧边栏组件 - 全新设计
 const AppSidebar = () => {
   const { pathname } = useLocation();
+  const cachedUser = (() => {
+    try { return JSON.parse(localStorage.getItem('heat_treatment_current_user') || 'null'); } catch { return null; }
+  })();
+  const isAdmin = cachedUser?.roleId === '1';
+  const isPlatformAdmin = cachedUser?.accountRoleId === '1';
+  const roleId = String(cachedUser?.roleId || '');
+  const menuPermissionForPath = (path: string): string | undefined => {
+    if (path === '/dashboard') return 'dashboard';
+    if (path === '/inbound') return 'inbound';
+    if (path === '/outbound') return 'outbound';
+    if (path === '/orders') return 'orders';
+    if (path === '/inventory') return 'inventory';
+    if (path === '/reconciliation') return 'reconciliation';
+    if (path.startsWith('/statistics')) return 'statistics';
+    if (path.startsWith('/customers')) return 'customers';
+    if (path.startsWith('/products')) return 'products';
+    if (path === '/settings/templates') return 'templates';
+    if (path === '/settings/permissions' || path === '/settings/feishu') return 'permissions';
+    if (path === '/settings/display') return 'display';
+    if (path === '/settings/manual') return 'manual';
+    if (path === '/settings/feature-flags') return 'featureFlags';
+    if (path === '/operation-logs') return 'logs';
+    if (path === '/admin' || path === '/tenant/manage') return 'admin';
+    return undefined;
+  };
+  const canSee = (item: NavItem) => {
+    const permission = menuPermissionForPath(item.path);
+    return (!item.adminOnly || isAdmin)
+      && (!item.platformOnly || isPlatformAdmin)
+      && (!permission || checkPermission(roleId, 'menu', permission));
+  };
+  const visibleMainItems = mainNavItems.filter(canSee);
+  const visibleBusinessItems = businessNavItems.filter(canSee);
+  const visibleAnalyticsItems = analyticsNavItems.filter(canSee);
+  const visibleSystemItems = systemNavItems
+    .filter(item => (!item.adminOnly || isAdmin) && (!item.platformOnly || isPlatformAdmin))
+    .map(item => item.children
+      ? { ...item, children: item.children.filter(canSee) }
+      : item,
+    )
+    .filter(item => item.children ? item.children.length > 0 : canSee(item));
 
   return (
     <Sidebar
@@ -416,7 +480,7 @@ const AppSidebar = () => {
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu className="gap-0.5">
-              {mainNavItems.map(item => (
+              {visibleMainItems.map(item => (
                 <SimpleNavItem 
                   key={item.path} 
                   item={item} 
@@ -434,7 +498,7 @@ const AppSidebar = () => {
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu className="gap-0.5">
-              {businessNavItems.map(item => (
+              {visibleBusinessItems.map(item => (
                 <SimpleNavItem 
                   key={item.path} 
                   item={item} 
@@ -452,7 +516,7 @@ const AppSidebar = () => {
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu className="gap-0.5">
-              {analyticsNavItems.map(item => (
+              {visibleAnalyticsItems.map(item => (
                 <SimpleNavItem 
                   key={item.path} 
                   item={item} 
@@ -470,7 +534,7 @@ const AppSidebar = () => {
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu className="gap-0.5">
-              {systemNavItems.map(item => 
+              {visibleSystemItems.map(item =>
                 item.children ? (
                   <CollapsibleNavItem 
                     key={item.path} 
@@ -539,7 +603,7 @@ const Breadcrumb = ({ pathname }: { pathname: string }) => {
 
   return (
     <nav className="flex items-center gap-1.5 text-sm">
-      <Link to="/" className="text-muted-foreground hover:text-foreground transition-colors">
+      <Link to="/dashboard" className="text-muted-foreground hover:text-foreground transition-colors">
         首页
       </Link>
       {items.map((item, index) => (
@@ -607,7 +671,12 @@ const Header = ({ pathname }: { pathname: string }) => {
       <header className="sticky top-0 z-30 w-full border-b border-border/40 bg-background/80 backdrop-blur-xl">
         <div className="flex h-14 items-center justify-between px-4 sm:px-6">
           {/* 左侧：面包屑 */}
-          <div className="flex items-center">
+          <div className="flex min-w-0 items-center">
+            <SidebarTrigger
+              className="mr-1 h-11 w-11 shrink-0 md:hidden"
+              aria-label="打开导航菜单"
+              title="打开导航菜单"
+            />
             <Breadcrumb pathname={pathname} />
           </div>
 

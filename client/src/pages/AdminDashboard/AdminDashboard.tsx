@@ -425,7 +425,12 @@ export default function AdminDashboard() {
           >
             <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
           </Button>
-          <Button variant="outline" size="icon">
+          <Button
+            variant="outline"
+            size="icon"
+            aria-label="查看预警提醒"
+            onClick={() => document.getElementById('admin-alerts')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+          >
             <Bell className="h-4 w-4" />
           </Button>
         </div>
@@ -609,7 +614,7 @@ export default function AdminDashboard() {
       {/* 下方内容区域 */}
       <div className="grid gap-6 lg:grid-cols-3">
         {/* 预警信息 */}
-        <Card>
+        <Card id="admin-alerts">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-yellow-500" />

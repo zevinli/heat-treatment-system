@@ -24,6 +24,7 @@ export const FIELD_NAMES = {
     createdAt: '登记时间',
     createdBy: '登记人',
     status: '状态',
+    attachments: '附件',
   },
   outbound: {
     orderId: '发货单号',
@@ -45,6 +46,7 @@ export const FIELD_NAMES = {
     inboundDate: '入库日期',
   },
   customer: {
+    code: '客户编号',
     name: '客户名称',
     contact: '联系人',
     phone: '联系电话',
@@ -55,6 +57,7 @@ export const FIELD_NAMES = {
     lastTradeDate: '最近交易日期',
   },
   reconciliation: {
+    orderId: '对账单号',
     date: '日期',
     customerName: '客户名称',
     outboundAmount: '出库金额',
@@ -85,6 +88,88 @@ export const FIELD_NAMES = {
     operator: '操作人',
     operateTime: '操作时间',
     remark: '备注',
+  },
+} as const;
+
+/**
+ * 同步字段的飞书字段类型。校验和“补齐缺失字段”共用这份定义，防止只按名称
+ * 校验后，把数字/日期错误写入文本字段而让任务反复失败。
+ * 1=文本，2=数字，3=单选，5=日期，6=进度，17=附件。
+ */
+export const FEISHU_FIELD_TYPES = {
+  inbound: {
+    [FIELD_NAMES.inbound.orderId]: 1,
+    [FIELD_NAMES.inbound.customerName]: 1,
+    [FIELD_NAMES.inbound.productName]: 1,
+    [FIELD_NAMES.inbound.quantity]: 2,
+    [FIELD_NAMES.inbound.weight]: 2,
+    [FIELD_NAMES.inbound.createdAt]: 5,
+    [FIELD_NAMES.inbound.createdBy]: 1,
+    [FIELD_NAMES.inbound.status]: 3,
+    [FIELD_NAMES.inbound.attachments]: 17,
+  },
+  outbound: {
+    [FIELD_NAMES.outbound.orderId]: 1,
+    [FIELD_NAMES.outbound.customerName]: 1,
+    [FIELD_NAMES.outbound.productName]: 1,
+    [FIELD_NAMES.outbound.quantity]: 2,
+    [FIELD_NAMES.outbound.weight]: 2,
+    [FIELD_NAMES.outbound.batchNo]: 1,
+    [FIELD_NAMES.outbound.createdAt]: 5,
+    [FIELD_NAMES.outbound.status]: 3,
+  },
+  inventory: {
+    [FIELD_NAMES.inventory.productName]: 1,
+    [FIELD_NAMES.inventory.material]: 1,
+    [FIELD_NAMES.inventory.currentStock]: 2,
+    [FIELD_NAMES.inventory.unit]: 1,
+    [FIELD_NAMES.inventory.location]: 1,
+    [FIELD_NAMES.inventory.batchNo]: 1,
+    [FIELD_NAMES.inventory.inboundDate]: 5,
+  },
+  customer: {
+    [FIELD_NAMES.customer.code]: 1,
+    [FIELD_NAMES.customer.name]: 1,
+    [FIELD_NAMES.customer.contact]: 1,
+    [FIELD_NAMES.customer.phone]: 1,
+    [FIELD_NAMES.customer.address]: 1,
+    [FIELD_NAMES.customer.totalInbound]: 2,
+    [FIELD_NAMES.customer.totalOutbound]: 2,
+    [FIELD_NAMES.customer.paymentRate]: 6,
+    [FIELD_NAMES.customer.lastTradeDate]: 5,
+  },
+  reconciliation: {
+    [FIELD_NAMES.reconciliation.orderId]: 1,
+    [FIELD_NAMES.reconciliation.date]: 5,
+    [FIELD_NAMES.reconciliation.customerName]: 1,
+    [FIELD_NAMES.reconciliation.outboundAmount]: 2,
+    [FIELD_NAMES.reconciliation.invoicedAmount]: 2,
+    [FIELD_NAMES.reconciliation.receivedAmount]: 2,
+    [FIELD_NAMES.reconciliation.paymentStatus]: 3,
+  },
+  quality: {
+    [FIELD_NAMES.quality.batchNo]: 1,
+    [FIELD_NAMES.quality.productName]: 1,
+    [FIELD_NAMES.quality.customerName]: 1,
+    [FIELD_NAMES.quality.inspectDate]: 5,
+    [FIELD_NAMES.quality.inspectItem]: 3,
+    [FIELD_NAMES.quality.inspectResult]: 1,
+    [FIELD_NAMES.quality.verdict]: 3,
+    [FIELD_NAMES.quality.inspector]: 1,
+    [FIELD_NAMES.quality.remark]: 1,
+  },
+  process: {
+    [FIELD_NAMES.process.batchNo]: 1,
+    [FIELD_NAMES.process.productName]: 1,
+    [FIELD_NAMES.process.customerName]: 1,
+    [FIELD_NAMES.process.processType]: 3,
+    [FIELD_NAMES.process.heatTemp]: 2,
+    [FIELD_NAMES.process.holdTime]: 2,
+    [FIELD_NAMES.process.coolMethod]: 1,
+    [FIELD_NAMES.process.chargeWeight]: 2,
+    [FIELD_NAMES.process.operator]: 1,
+    [FIELD_NAMES.process.operateTime]: 5,
+    [FIELD_NAMES.process.remark]: 1,
   },
 } as const;
 

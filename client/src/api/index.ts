@@ -248,7 +248,10 @@ export async function createProduct(data: {
   unitPrice?: number;
   customerCode: string;
   customerName: string;
+  customerIds?: string[];
   status?: string;
+  warningThreshold?: number;
+  attachments?: string[];
 }) {
   try {
     const response = await axiosForBackend({
@@ -275,11 +278,10 @@ export async function updateProduct(
     unitPrice?: number;
     customerCode?: string;
     customerName?: string;
+    customerIds?: string[];
     status?: string;
-    stock?: number;
-    stockWeight?: number;
-    inboundQuantity?: number;
-    inboundWeight?: number;
+    warningThreshold?: number;
+    attachments?: string[];
   }
 ) {
   try {
@@ -408,6 +410,39 @@ export async function canUndoInbound(orderId: string) {
     logger.error('检查入库单撤销状态失败', error);
     throw error;
   }
+}
+
+export async function requestUndoApproval(type: 'inbound' | 'outbound', orderId: string, reason: string) {
+  const response = await axiosForBackend({
+    url: `/api/undo/${type}/${orderId}/request`,
+    method: 'POST',
+    data: { reason },
+  });
+  return response.data;
+}
+
+export interface UndoApprovalRecord {
+  id: string;
+  type: 'inbound_undo' | 'outbound_undo';
+  entityId: string;
+  requester: string;
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected';
+  requestedAt: string;
+}
+
+export async function getUndoApprovals(status: 'pending' | 'approved' | 'rejected' = 'pending'): Promise<UndoApprovalRecord[]> {
+  const response = await axiosForBackend({ url: '/api/undo/approvals', method: 'GET', params: { status } });
+  return response.data.items || [];
+}
+
+export async function decideUndoApproval(id: string, approved: boolean, rejectReason?: string) {
+  const response = await axiosForBackend({
+    url: `/api/undo/approvals/${id}/decision`,
+    method: 'PUT',
+    data: { approved, rejectReason },
+  });
+  return response.data;
 }
 
 // ======== 库存管理 API ========
@@ -612,26 +647,12 @@ export async function getPendingReconciliationOrders(customerId: string) {
   }
 }
 
-export async function updateOutboundOrderStatus(id: string, status: string) {
-  try {
-    const response = await axiosForBackend({
-      url: `/api/outbound/${id}/status`,
-      method: 'PUT',
-      data: { status },
-    });
-    return response.data;
-  } catch (error) {
-    logger.error('更新出库单状态失败', error);
-    throw error;
-  }
-}
-
 export async function cancelOutboundOrder(id: string, reason?: string) {
   try {
     const response = await axiosForBackend({
       url: `/api/undo/outbound/${id}`,
       method: 'POST',
-      data: { reason: reason || '用户撤销' },
+      data: { reason: reason || '用户主动撤销' },
     });
     return response.data;
   } catch (error) {
@@ -726,7 +747,7 @@ export async function cancelInboundOrder(id: string, reason?: string) {
     const response = await axiosForBackend({
       url: `/api/undo/inbound/${id}`,
       method: 'POST',
-      data: { reason: reason || '用户撤销' },
+      data: { reason: reason || '用户主动撤销' },
     });
     return response.data;
   } catch (error) {
@@ -774,7 +795,7 @@ export async function getReconciliations(params?: {
 export async function getReconciliationById(id: string) {
   try {
     const response = await axiosForBackend({
-      url: `/api/reconciliations/${id}/amounts`,
+      url: `/api/reconciliations/${id}`,
       method: 'GET',
     });
     return response.data;
@@ -836,7 +857,7 @@ export async function updateReconciliation(
 ) {
   try {
     const response = await axiosForBackend({
-      url: `/api/reconciliations/${id}`,
+      url: `/api/reconciliations/${id}/amounts`,
       method: 'PUT',
       data,
     });

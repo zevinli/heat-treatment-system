@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'crypto';
 import { and, desc, eq, gt, isNull, lt, ne, sql } from 'drizzle-orm';
 import { DRIZZLE_DATABASE } from '@lark-apaas/fullstack-nestjs-core';
@@ -33,37 +33,68 @@ export class AuthService {
       throw new ServiceUnavailableException('系统尚未初始化管理员，请配置 INITIAL_ADMIN_USERNAME 和 INITIAL_ADMIN_PASSWORD');
     }
     if (username !== configuredUser || password !== configuredPassword) return;
-    await this.db.insert(appUserTable).values({
-      username: configuredUser,
-      passwordHash: this.hashPassword(configuredPassword),
-      name: '系统管理员',
-      role: 'admin',
-      department: '管理部',
-      deviceLimit: 3,
-    });
+    try {
+      await this.db.insert(appUserTable).values({
+        username: configuredUser,
+        passwordHash: this.hashPassword(configuredPassword),
+        name: '系统管理员',
+        role: 'admin',
+        department: '管理部',
+        deviceLimit: 3,
+      });
+    } catch (error: any) {
+      // 两个首个登录请求可能同时看到空表；其中一个成功即可。
+      if (error?.code !== '23505') throw error;
+    }
   }
 
   async login(username: string, password: string, deviceName?: string) {
     if (!username?.trim() || !password) throw new BadRequestException('请输入用户名和密码');
     await this.ensureBootstrapAdmin(username.trim(), password);
-    const [user] = await this.db.select().from(appUserTable).where(eq(appUserTable.username, username.trim())).limit(1);
-    if (!user || user.status !== 'active' || !this.verifyPassword(password, user.passwordHash)) {
-      throw new UnauthorizedException('用户名或密码错误');
-    }
+    const outcome = await this.db.transaction(async (tx: any) => {
+      // 锁定账号行，使设备数检查与会话创建串行化，避免并发登录同时越过上限。
+      const [user] = await tx.select().from(appUserTable)
+        .where(eq(appUserTable.username, username.trim())).limit(1).for('update');
+      if (!user || user.status !== 'active') {
+        return { error: '用户名或密码错误' };
+      }
+      const now = new Date();
+      if (user.lockedUntil && new Date(user.lockedUntil) > now) {
+        const minutes = Math.max(1, Math.ceil((new Date(user.lockedUntil).getTime() - now.getTime()) / 60_000));
+        return { error: `账号因连续登录失败已临时锁定，请约 ${minutes} 分钟后重试` };
+      }
+      if (!this.verifyPassword(password, user.passwordHash)) {
+        const attempts = (user.lockedUntil && new Date(user.lockedUntil) <= now ? 0 : Number(user.failedLoginAttempts || 0)) + 1;
+        const lockedUntil = attempts >= 5 ? new Date(now.getTime() + 15 * 60_000) : null;
+        await tx.update(appUserTable).set({
+          failedLoginAttempts: attempts >= 5 ? 0 : attempts,
+          lockedUntil,
+          updatedAt: now,
+        }).where(eq(appUserTable.id, user.id));
+        return { error: lockedUntil ? '账号因连续登录失败已临时锁定15分钟' : '用户名或密码错误' };
+      }
 
-    await this.db.delete(authSessionTable).where(lt(authSessionTable.expiresAt, new Date()));
-    const [{ count }] = await this.db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(authSessionTable)
-      .where(and(eq(authSessionTable.userId, user.id), isNull(authSessionTable.revokedAt), gt(authSessionTable.expiresAt, new Date())));
-    if (count >= user.deviceLimit) throw new UnauthorizedException(`已达到最大登录设备数 ${user.deviceLimit}，请先退出其他设备`);
+      await tx.delete(authSessionTable).where(lt(authSessionTable.expiresAt, now));
+      const [{ count }] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(authSessionTable)
+        .where(and(eq(authSessionTable.userId, user.id), isNull(authSessionTable.revokedAt), gt(authSessionTable.expiresAt, now)));
+      if (count >= user.deviceLimit) return { error: `已达到最大登录设备数 ${user.deviceLimit}，请先退出其他设备` };
 
-    const tokenId = randomUUID();
-    const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000);
-    const token = this.tokens.sign({ sub: user.id, username: user.username, name: user.name, role: user.role, jti: tokenId });
-    await this.db.insert(authSessionTable).values({ userId: user.id, tokenId, deviceName: deviceName?.slice(0, 255), expiresAt });
-    await this.db.update(appUserTable).set({ lastLoginAt: new Date(), updatedAt: new Date() }).where(eq(appUserTable.id, user.id));
-    return { token, expiresAt, user: this.toPublicUser(user) };
+      const tokenId = randomUUID();
+      const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000);
+      const token = this.tokens.sign({ sub: user.id, username: user.username, name: user.name, role: user.role, jti: tokenId });
+      await tx.insert(authSessionTable).values({ userId: user.id, tokenId, deviceName: deviceName?.slice(0, 255), expiresAt });
+      await tx.update(appUserTable).set({
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        lastLoginAt: now,
+        updatedAt: now,
+      }).where(eq(appUserTable.id, user.id));
+      return { value: { token, expiresAt, user: this.toPublicUser({ ...user, lastLoginAt: now }) } };
+    });
+    if (outcome.error) throw new UnauthorizedException(outcome.error);
+    return outcome.value;
   }
 
   async logout(tokenId: string) {
@@ -75,6 +106,15 @@ export class AuthService {
     const [user] = await this.db.select().from(appUserTable).where(eq(appUserTable.id, id)).limit(1);
     if (!user) throw new UnauthorizedException('用户不存在');
     return this.toPublicUser(user);
+  }
+
+  /** 邀请加入组织前先创建一个无租户数据权限的基础账号。 */
+  async register(data: { username: string; password: string; name: string }) {
+    return this.createUserInternal({
+      ...data,
+      role: 'viewer',
+      deviceLimit: 3,
+    });
   }
 
   async updateSelf(id: string, data: {
@@ -132,12 +172,25 @@ export class AuthService {
     return { success: true };
   }
 
-  async listUsers() {
+  async listUsers(actorId: string) {
+    await this.assertPlatformAdmin(actorId);
     const rows = await this.db.select().from(appUserTable).orderBy(desc(appUserTable.createdAt));
     return rows.map((user: any) => this.toPublicUser(user));
   }
 
   async createUser(data: {
+    username: string;
+    password: string;
+    name: string;
+    role: string;
+    department?: string;
+    deviceLimit?: number;
+  }, actorId: string) {
+    await this.assertPlatformAdmin(actorId);
+    return this.createUserInternal(data);
+  }
+
+  private async createUserInternal(data: {
     username: string;
     password: string;
     name: string;
@@ -160,16 +213,21 @@ export class AuthService {
     const [duplicate] = await this.db.select({ id: appUserTable.id }).from(appUserTable)
       .where(eq(appUserTable.username, username)).limit(1);
     if (duplicate) throw new BadRequestException('用户名已存在');
-    const [created] = await this.db.insert(appUserTable).values({
-      username,
-      passwordHash: this.hashPassword(data.password),
-      name,
-      role: data.role,
-      department: data.department?.trim() || null,
-      deviceLimit,
-      status: 'active',
-    }).returning();
-    return this.toPublicUser(created);
+    try {
+      const [created] = await this.db.insert(appUserTable).values({
+        username,
+        passwordHash: this.hashPassword(data.password),
+        name,
+        role: data.role,
+        department: data.department?.trim() || null,
+        deviceLimit,
+        status: 'active',
+      }).returning();
+      return this.toPublicUser(created);
+    } catch (error: any) {
+      if (error?.code === '23505') throw new ConflictException('用户名已存在');
+      throw error;
+    }
   }
 
   async updateUser(id: string, actorId: string, data: {
@@ -179,6 +237,7 @@ export class AuthService {
     status?: 'active' | 'inactive';
     deviceLimit?: number;
   }) {
+    await this.assertPlatformAdmin(actorId);
     const [existing] = await this.db.select().from(appUserTable).where(eq(appUserTable.id, id));
     if (!existing) throw new BadRequestException('用户不存在');
     if (id === actorId && (data.status === 'inactive' || (data.role && data.role !== existing.role))) {
@@ -186,6 +245,10 @@ export class AuthService {
     }
     if (data.role && !['admin', 'operator', 'finance', 'viewer'].includes(data.role)) {
       throw new BadRequestException('无效角色');
+    }
+    if (data.name !== undefined && !data.name.trim()) throw new BadRequestException('姓名不能为空');
+    if (data.status !== undefined && !['active', 'inactive'].includes(data.status)) {
+      throw new BadRequestException('无效用户状态');
     }
     if (data.deviceLimit !== undefined && (!Number.isInteger(data.deviceLimit) || data.deviceLimit < 1 || data.deviceLimit > 10)) {
       throw new BadRequestException('设备上限必须为1-10的整数');
@@ -210,7 +273,8 @@ export class AuthService {
     return this.toPublicUser(updated);
   }
 
-  async resetPassword(id: string, password: string) {
+  async resetPassword(id: string, password: string, actorId: string) {
+    await this.assertPlatformAdmin(actorId);
     if (!password || password.length < 8) throw new BadRequestException('新密码至少8位');
     const [updated] = await this.db.update(appUserTable).set({
       passwordHash: this.hashPassword(password), updatedAt: new Date(),
@@ -219,6 +283,14 @@ export class AuthService {
     await this.db.update(authSessionTable).set({ revokedAt: new Date() })
       .where(and(eq(authSessionTable.userId, id), isNull(authSessionTable.revokedAt)));
     return { success: true };
+  }
+
+  private async assertPlatformAdmin(actorId: string): Promise<void> {
+    const [actor] = await this.db.select({ role: appUserTable.role, status: appUserTable.status })
+      .from(appUserTable).where(eq(appUserTable.id, actorId)).limit(1);
+    if (!actor || actor.status !== 'active' || actor.role !== 'admin') {
+      throw new UnauthorizedException('仅平台管理员可管理全局账号');
+    }
   }
 
   toPublicUser(user: any) {

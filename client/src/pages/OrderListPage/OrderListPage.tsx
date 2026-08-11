@@ -24,6 +24,7 @@ import {
   AlertCircle,
   Loader2,
   X,
+  CheckCircle,
 } from 'lucide-react';
 import { useData, type IInboundOrder, type IOutboundOrder } from '@/data/DataContext';
 import * as api from '@/api';
@@ -38,6 +39,8 @@ import {
 } from '@/components/ui/filter';
 import { StatusFilter } from '@/components/StatusFilter/StatusFilter';
 import type { OrderStatusFilter } from '@shared/api.interface';
+import { UNDO_WINDOW } from '@/utils/constants';
+import { usePermissions } from '@/hooks/usePermission';
 
 // 单据状态类型
 interface OrderWithDetails extends IInboundOrder {
@@ -51,6 +54,8 @@ interface OutboundWithDetails extends IOutboundOrder {
 }
 
 const OrderListPage: React.FC = () => {
+  const { hasPermission } = usePermissions();
+  const canApproveUndo = hasPermission('system:permission' as any);
   const {
     inboundOrders: rawInboundOrders,
     outboundOrders: rawOutboundOrders,
@@ -78,6 +83,8 @@ const OrderListPage: React.FC = () => {
   const [undoReason, setUndoReason] = useState('');
   const [undoLoading, setUndoLoading] = useState(false);
   const [undoChecking, setUndoChecking] = useState(false);
+  const [undoRequiresApproval, setUndoRequiresApproval] = useState(false);
+  const [pendingApprovals, setPendingApprovals] = useState<api.UndoApprovalRecord[]>([]);
 
   // 详情弹窗
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
@@ -89,6 +96,19 @@ const OrderListPage: React.FC = () => {
     refreshInboundOrders();
     refreshOutboundOrders();
   }, []);
+
+  const refreshUndoApprovals = useCallback(async () => {
+    if (!canApproveUndo) return;
+    try {
+      setPendingApprovals(await api.getUndoApprovals());
+    } catch {
+      setPendingApprovals([]);
+    }
+  }, [canApproveUndo]);
+
+  useEffect(() => {
+    refreshUndoApprovals();
+  }, [refreshUndoApprovals]);
 
   // 筛选入库单
   const filteredInboundOrders = React.useMemo(() => {
@@ -146,14 +166,12 @@ const OrderListPage: React.FC = () => {
     setOutboundStatus('all');
   };
 
-  // 检查是否可以撤销（24小时内）
+  // 仅用于控制按钮初始可见性；点击时仍由后端执行完整库存、对账和时限校验。
   const canUndoOrder = useCallback((createdAt: string, status: string): boolean => {
-    if (status === 'cancelled') return false;
-    const created = dayjs(createdAt);
-    const now = dayjs();
-    const hoursDiff = now.diff(created, 'hour');
-    return hoursDiff < 24;
+    return status !== 'cancelled' && Number.isFinite(new Date(createdAt).getTime());
   }, []);
+
+  const isUndoExpired = (createdAt: string) => Date.now() - new Date(createdAt).getTime() >= UNDO_WINDOW.INBOUND;
 
   // 获取行样式 - 已撤销的行置灰显示
   const getInboundRowClassName = (record: IInboundOrder) => {
@@ -175,8 +193,13 @@ const OrderListPage: React.FC = () => {
         : await api.canUndoOutbound(order.id);
 
       if (!checkResult.canUndo) {
-        toast.error(checkResult.reason || '该单据无法撤销');
-        return;
+        if (!checkResult.reason?.includes('撤销时限')) {
+          toast.error(checkResult.reason || '该单据无法撤销');
+          return;
+        }
+        setUndoRequiresApproval(true);
+      } else {
+        setUndoRequiresApproval(false);
       }
 
       setUndoOrder({ ...order, type } as any);
@@ -191,26 +214,45 @@ const OrderListPage: React.FC = () => {
 
   // 执行撤销
   const handleConfirmUndo = async () => {
-    if (!undoOrder || !undoReason.trim()) {
-      toast.error('请输入撤销原因');
+    if (!undoOrder || undoReason.trim().length < 5) {
+      toast.error('撤销原因至少需要5个字符');
       return;
     }
 
     setUndoLoading(true);
     try {
       const isInbound = 'inboundNo' in undoOrder;
-      if (isInbound) {
-        await cancelInboundOrder(undoOrder.id, undoReason);
+      if (undoRequiresApproval) {
+        await api.requestUndoApproval(isInbound ? 'inbound' : 'outbound', undoOrder.id, undoReason.trim());
+        toast.success('撤销申请已提交，等待组织管理员审批');
+        await refreshUndoApprovals();
+      } else if (isInbound) {
+        const success = await cancelInboundOrder(undoOrder.id, undoReason);
+        if (!success) return;
       } else {
         await cancelOutboundOrder(undoOrder.id, undoReason);
       }
       setUndoDialogOpen(false);
       setUndoOrder(null);
       setUndoReason('');
+      setUndoRequiresApproval(false);
     } catch (error) {
       // 错误已在API层处理
     } finally {
       setUndoLoading(false);
+    }
+  };
+
+  const decideApproval = async (approval: api.UndoApprovalRecord, approved: boolean) => {
+    const rejectReason = approved ? undefined : window.prompt('请输入拒绝原因（至少2个字符）')?.trim();
+    if (!approved && (!rejectReason || rejectReason.length < 2)) return;
+    if (approved && !window.confirm('批准后将立即撤销单据并回滚库存，确定继续吗？')) return;
+    try {
+      await api.decideUndoApproval(approval.id, approved, rejectReason);
+      toast.success(approved ? '已批准并完成撤销' : '已拒绝申请');
+      await Promise.all([refreshInboundOrders(), refreshOutboundOrders(), refreshUndoApprovals()]);
+    } catch (error: any) {
+      toast.error(error?.response?.data?.message || '处理审批失败');
     }
   };
 
@@ -341,7 +383,7 @@ const OrderListPage: React.FC = () => {
                 disabled={undoChecking}
               >
                 <RotateCcw className={`h-4 w-4 mr-1 ${undoChecking ? 'animate-spin' : ''}`} />
-                撤销
+                {isUndoExpired(record.createdAt) ? '申请撤销' : '撤销'}
               </Button>
             )}
           </div>
@@ -458,7 +500,7 @@ const OrderListPage: React.FC = () => {
                 disabled={undoChecking}
               >
                 <RotateCcw className={`h-4 w-4 mr-1 ${undoChecking ? 'animate-spin' : ''}`} />
-                撤销
+                {isUndoExpired(record.createdAt) ? '申请撤销' : '撤销'}
               </Button>
             )}
           </div>
@@ -476,6 +518,26 @@ const OrderListPage: React.FC = () => {
           <p className="text-muted-foreground mt-1">查看和管理所有入库单、出库单，支持撤销操作</p>
         </div>
       </div>
+
+      {canApproveUndo && pendingApprovals.length > 0 && (
+        <Card className="border-warning/40">
+          <CardHeader><CardTitle className="text-lg">待审批撤销申请（{pendingApprovals.length}）</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            {pendingApprovals.map(approval => (
+              <div key={approval.id} className="flex flex-col md:flex-row md:items-center gap-3 rounded-lg border p-3">
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium">{approval.type === 'inbound_undo' ? '入库单' : '出库单'}撤销</div>
+                  <div className="text-sm text-muted-foreground break-all">单据ID：{approval.entityId} · 原因：{approval.reason} · {dayjs(approval.requestedAt).format('YYYY-MM-DD HH:mm')}</div>
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => decideApproval(approval, true)}><CheckCircle className="h-4 w-4 mr-1" />批准并撤销</Button>
+                  <Button size="sm" variant="outline" onClick={() => decideApproval(approval, false)}><X className="h-4 w-4 mr-1" />拒绝</Button>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       {/* 标签页 */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
@@ -665,10 +727,12 @@ const OrderListPage: React.FC = () => {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <AlertCircle className="h-5 w-5 text-red-500" />
-              确认撤销单据
+              {undoRequiresApproval ? '提交撤销审批' : '确认撤销单据'}
             </DialogTitle>
             <DialogDescription>
-              此操作将撤销该单据并回滚库存，24小时内的单据才能撤销。
+              {undoRequiresApproval
+                ? '该单据已超过30分钟，需由组织管理员批准后才会撤销并回滚库存。'
+                : '此操作将撤销该单据并回滚库存，创建后30分钟内可直接撤销。'}
               {'inboundNo' in (undoOrder || {}) ? '入库单' : '出库单'}号：
               <span className="font-medium">
                 {(undoOrder as any)?.inboundNo || (undoOrder as any)?.outboundNo}
@@ -679,13 +743,13 @@ const OrderListPage: React.FC = () => {
             <div className="space-y-2">
               <label className="text-sm font-medium">撤销原因 *</label>
               <Input
-                placeholder="请输入撤销原因（必填）"
+                placeholder="请输入撤销原因（至少5个字符）"
                 value={undoReason}
                 onChange={(e) => setUndoReason(e.target.value)}
               />
             </div>
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
-              <p className="font-medium mb-1">撤销后影响：</p>
+            <div className="bg-warning/10 border border-warning/30 rounded-lg p-3 text-sm text-foreground">
+              <p className="font-medium mb-1">{undoRequiresApproval ? '审批通过后影响：' : '撤销后影响：'}</p>
               <ul className="list-disc list-inside space-y-1">
                 <li>单据状态将变为&quot;已撤销&quot;</li>
                 <li>{'inboundNo' in (undoOrder || {}) ? '入库产品将从库存中扣除' : '出库产品将恢复至库存'}</li>
@@ -700,10 +764,10 @@ const OrderListPage: React.FC = () => {
             <Button
               variant="destructive"
               onClick={handleConfirmUndo}
-              disabled={!undoReason.trim() || undoLoading}
+              disabled={undoReason.trim().length < 5 || undoLoading}
             >
               {undoLoading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              确认撤销
+              {undoRequiresApproval ? '提交审批' : '确认撤销'}
             </Button>
           </DialogFooter>
         </DialogContent>
