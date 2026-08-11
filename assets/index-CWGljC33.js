@@ -1,0 +1,1 @@
+import"./index-BiYXE8cc.js";const e={load:n=>({call:async(a,l)=>(console.log("[CapabilityClient] Calling",a,"on",n),{success:!0,content:"",data:{}}),async*callStream(a,l){console.log("[CapabilityClient] Streaming",a,"on",n,l),yield{content:"智能分析服务尚未配置，请联系管理员配置后重试。"}}}),async run(n){return console.log("[CapabilityClient] Running:",n.capabilityId),{success:!0}}};export{e as c};
