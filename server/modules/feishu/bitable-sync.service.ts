@@ -85,6 +85,74 @@ export class BitableSyncService {
 
   constructor(private readonly auth: FeishuAuthService, private readonly tenantConfigService?: FeishuTenantConfigService) {}
 
+  /**
+   * 接受完整飞书多维表格链接或 App Token，读取其中的数据表并按名称自动匹配。
+   * 管理员无需人工寻找七个 Table ID。
+   */
+  async discoverTables(input: string) {
+    if (!this.auth.isConfigured()) throw new Error('服务端飞书 App 凭据未配置');
+    const raw = String(input || '').trim();
+    if (/^https?:\/\//i.test(raw)) {
+      let parsed: URL;
+      try { parsed = new URL(raw); } catch { throw new Error('飞书多维表格链接格式不正确'); }
+      const host = parsed.hostname.toLowerCase();
+      const trusted = host === 'feishu.cn' || host.endsWith('.feishu.cn') || host === 'larksuite.com' || host.endsWith('.larksuite.com');
+      if (parsed.protocol !== 'https:' || !trusted) throw new Error('只允许连接可信的飞书或 Lark 多维表格地址');
+    }
+    const urlMatch = raw.match(/\/base\/([A-Za-z0-9_-]{3,255})/i);
+    const appToken = urlMatch?.[1] || (/^[A-Za-z0-9_-]{3,255}$/.test(raw) ? raw : '');
+    if (!appToken) throw new Error('请输入有效的飞书多维表格链接或 App Token');
+    const baseUrl = urlMatch ? raw.split(/[?#]/)[0] : `https://feishu.cn/base/${appToken}`;
+    const client = await this.auth.getAuthorizedClient();
+    const response = await client.get(`${BITABLE_V1}/${appToken}/tables`, { params: { page_size: 100 } });
+    if (response.data.code !== 0) throw new Error(response.data.msg || String(response.data.code));
+    const items: Array<{ table_id: string; name: string }> = response.data.data?.items || [];
+    const normalize = (value: string) => value
+      .replace(/^\s*\d{1,2}[.、\s_-]*/, '')
+      .replace(/[\s_-]/g, '')
+      .replace(/表$/, '');
+    const aliases: Record<string, string[]> = {
+      inbound: ['来货登记', '入库登记', '来货记录'],
+      outbound: ['发货记录', '出库记录', '快速发货'],
+      inventory: ['库存快照', '库存总', '库存'],
+      customer: ['客户总览', '客户信息', '客户'],
+      reconciliation: ['对账与回款', '每日对账', '对账单', '智能对账'],
+      quality: ['质检记录', '质量检验', '质检'],
+      process: ['工艺参数', '热处理工艺', '工艺'],
+    };
+    const tables: Record<string, string> = {};
+    const fieldNamesByTable = new Map<string, Set<string>>();
+    const recognizedNames = new Set(Object.values(aliases).flat().map(normalize));
+    for (const item of items.filter(item => recognizedNames.has(normalize(item.name)))) {
+      try {
+        await this.rateLimit();
+        const fieldsResponse = await client.get(`${BITABLE_V1}/${appToken}/tables/${item.table_id}/fields`, { params: { page_size: 100 } });
+        if (fieldsResponse.data.code === 0) {
+          fieldNamesByTable.set(item.table_id, new Set((fieldsResponse.data.data?.items || []).map((field: any) => field.field_name)));
+        }
+      } catch {
+        // 名称仍可用于回退匹配，最终保存时会进行完整结构校验。
+      }
+    }
+    for (const [key, names] of Object.entries(aliases)) {
+      const candidates = items.filter(item => names.map(normalize).includes(normalize(item.name)));
+      const expectedFields = Object.keys((FEISHU_FIELD_TYPES as any)[key] || {});
+      candidates.sort((left, right) => {
+        const score = (item: { table_id: string }) => expectedFields.filter(field => fieldNamesByTable.get(item.table_id)?.has(field)).length;
+        return score(right) - score(left);
+      });
+      const match = candidates[0];
+      if (match) tables[key] = match.table_id;
+    }
+    return {
+      appToken,
+      baseUrl,
+      tables,
+      discovered: items.map(item => ({ id: item.table_id, name: item.name })),
+      missing: Object.keys(aliases).filter(key => !tables[key]),
+    };
+  }
+
   // =====================================================
   // 公开方法 — 业务层直接调用
   // =====================================================
@@ -369,8 +437,9 @@ export class BitableSyncService {
       { key: 'inventory', id: config.tableInventory, fields: FEISHU_FIELD_TYPES.inventory },
       { key: 'customer', id: config.tableCustomer, fields: FEISHU_FIELD_TYPES.customer },
       { key: 'reconciliation', id: config.tableReconciliation, fields: FEISHU_FIELD_TYPES.reconciliation },
-      { key: 'quality', id: config.tableQuality, fields: FEISHU_FIELD_TYPES.quality },
-      { key: 'process', id: config.tableProcess, fields: FEISHU_FIELD_TYPES.process },
+      // 质检和工艺是按需开通的扩展模块；未配置时不应让五张核心表校验失败。
+      ...(config.tableQuality ? [{ key: 'quality', id: config.tableQuality, fields: FEISHU_FIELD_TYPES.quality }] : []),
+      ...(config.tableProcess ? [{ key: 'process', id: config.tableProcess, fields: FEISHU_FIELD_TYPES.process }] : []),
     ];
   }
 

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Search,
@@ -40,6 +40,8 @@ import { Table } from '@lark-apaas/client-toolkit/antd-table';
 import { useData } from '@/data/DataContext';
 import type { ICustomer, IProduct, ProductStatus } from '@/data/mockData';
 import { StepProgress } from '@/pages/StepProgressPage/StepProgressPage';
+import { useTenant } from '@/contexts/TenantContext';
+import { readTenantScopedJson, tenantScopedStorageKey, writeTenantScopedJson } from '@/lib/tenant-storage';
 
 // 注意：单号生成已移至后端，前端不再生成单号
 // 后端使用UUID确保唯一性，避免前端并发生成重复单号
@@ -67,6 +69,10 @@ interface IOutboundDetail {
 
 const OutboundPage: React.FC = () => {
   const navigate = useNavigate();
+  const { currentTenant } = useTenant();
+  const operationDefaults = readTenantScopedJson('operation_defaults', currentTenant?.orgCode, {
+    creator: '收发', transporter: '', plateNumber: '', driver: '',
+  });
   const { products: rawProducts, customers: rawCustomers, addOutboundOrder, refreshProducts } = useData();
 
   // 防御性处理：确保数据是数组
@@ -87,12 +93,12 @@ const OutboundPage: React.FC = () => {
   // 步骤3：出库单信息
   const [outboundDate, setOutboundDate] = useState(new Date().toISOString().split('T')[0]);
   const [outboundTime, setOutboundTime] = useState(new Date().toTimeString().slice(0, 5));
-  const [creator, setCreator] = useState('收发');
+  const [creator, setCreator] = useState(operationDefaults.creator);
   const [internalCode, setInternalCode] = useState('');
   const [receiver, setReceiver] = useState('');
-  const [transporter, setTransporter] = useState('');
-  const [plateNumber, setPlateNumber] = useState('');
-  const [driver, setDriver] = useState('');
+  const [transporter, setTransporter] = useState(operationDefaults.transporter);
+  const [plateNumber, setPlateNumber] = useState(operationDefaults.plateNumber);
+  const [driver, setDriver] = useState(operationDefaults.driver);
   const [selfCode, setSelfCode] = useState('');
   const [handler, setHandler] = useState('');
   const [handleTime, setHandleTime] = useState(new Date().toLocaleString('zh-CN'));
@@ -246,6 +252,7 @@ const OutboundPage: React.FC = () => {
   // 保存出库单并打印 - 创建出库单、扣减库存、打开打印弹窗
   const [currentOutboundNo, setCurrentOutboundNo] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const saveLockRef = useRef(false);
 
   const handleSaveAndPrint = async () => {
     if (outboundDetails.length === 0) {
@@ -315,8 +322,12 @@ const OutboundPage: React.FC = () => {
       toast.warning(`注意：${productNames}，请确认是否继续`);
     }
 
-    // 防止重复提交
-    if (isSaving) return;
+    if (!navigator.onLine) {
+      toast.warning('当前网络不可用，内容已保存在本组织草稿中；网络恢复后再提交');
+      return;
+    }
+    if (isSaving || saveLockRef.current) return;
+    saveLockRef.current = true;
     setIsSaving(true);
 
     try {
@@ -366,14 +377,16 @@ const OutboundPage: React.FC = () => {
       // 立即刷新产品数据，确保库存显示最新
       await refreshProducts();
 
-      toast.success(`出库单 ${order.outboundNo} 保存成功，库存已扣减`);
+      toast.success(`出库单 ${order.outboundNo} 保存成功，库存已扣减；飞书将自动同步`);
       setPrintDialogOpen(true);
 
       // 清除草稿
       clearDraft();
+      writeTenantScopedJson('operation_defaults', currentTenant?.orgCode, { creator, transporter, plateNumber, driver });
     } catch (error) {
       toast.error('保存失败：' + (error instanceof Error ? error.message : '未知错误'));
     } finally {
+      saveLockRef.current = false;
       setIsSaving(false);
     }
   };
@@ -386,7 +399,7 @@ const OutboundPage: React.FC = () => {
   };
 
   // 本地暂存相关
-  const STORAGE_KEY = 'outbound_draft';
+  const STORAGE_KEY = tenantScopedStorageKey('outbound_draft', currentTenant?.orgCode);
   const [hasDraft, setHasDraft] = useState(false);
   const [showDraftBanner, setShowDraftBanner] = useState(false);
   const [draftTimestamp, setDraftTimestamp] = useState<number | null>(null);
@@ -408,12 +421,13 @@ const OutboundPage: React.FC = () => {
         localStorage.removeItem(STORAGE_KEY);
       }
     }
-  }, []);
+  }, [STORAGE_KEY]);
   
   // 自动保存草稿
   useEffect(() => {
     if (currentStep > 1 && selectedCustomer) {
       const draft = {
+        orgCode: currentTenant?.orgCode,
         currentStep,
         selectedCustomer,
         outboundDetails,
@@ -428,7 +442,7 @@ const OutboundPage: React.FC = () => {
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
     }
-  }, [currentStep, selectedCustomer, outboundDetails, outboundDate, outboundTime, creator, receiver, transporter, plateNumber, driver]);
+  }, [STORAGE_KEY, currentTenant?.orgCode, currentStep, selectedCustomer, outboundDetails, outboundDate, outboundTime, creator, receiver, transporter, plateNumber, driver]);
   
   // 恢复草稿
   const restoreDraft = (draft: any, silent = false) => {

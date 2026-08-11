@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { and, asc, eq, inArray, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte, or, sql } from 'drizzle-orm';
 import { integrationSyncJobTable } from '../../database/schema';
 import { BitableSyncService, type SyncResult } from './bitable-sync.service';
 
 export type FeishuSyncTopic = 'inbound' | 'outbound' | 'customer' | 'reconciliation';
+export type FeishuSyncJobInput = { topic: FeishuSyncTopic; aggregateKey: string; payload: Record<string, unknown> };
 
 /**
  * Transactional outbox for Feishu writes.
@@ -47,6 +48,39 @@ export class FeishuOutboxService {
         updatedAt: new Date(),
       },
     });
+  }
+
+  /** 大批量历史初始化使用分块 upsert，避免逐条往返导致请求超时。 */
+  async enqueueMany(db: any, jobs: FeishuSyncJobInput[]): Promise<number> {
+    if (jobs.length === 0) return 0;
+    const now = new Date();
+    for (let offset = 0; offset < jobs.length; offset += 500) {
+      const chunk = jobs.slice(offset, offset + 500);
+      await db.insert(integrationSyncJobTable).values(chunk.map(job => ({
+        topic: job.topic,
+        aggregateKey: job.aggregateKey,
+        payload: job.payload,
+        status: 'pending',
+        attemptCount: 0,
+        nextAttemptAt: now,
+        lockedAt: null,
+        completedAt: null,
+        lastError: null,
+      }))).onConflictDoUpdate({
+        target: [integrationSyncJobTable.topic, integrationSyncJobTable.aggregateKey],
+        set: {
+          payload: sql`excluded.payload`,
+          status: 'pending',
+          attemptCount: 0,
+          nextAttemptAt: now,
+          lockedAt: null,
+          completedAt: null,
+          lastError: null,
+          updatedAt: now,
+        },
+      });
+    }
+    return jobs.length;
   }
 
   async processTenant(orgCode: string, db: any, batchSize = 30): Promise<{ completed: number; failed: number }> {
@@ -127,6 +161,22 @@ export class FeishuOutboxService {
     const summary: Record<string, number> = { pending: 0, processing: 0, failed: 0, completed: 0 };
     for (const row of rows) summary[row.status] = Number(row.count || 0);
     return summary;
+  }
+
+  async getRecent(db: any, limit = 30) {
+    return db.select({
+      id: integrationSyncJobTable.id,
+      topic: integrationSyncJobTable.topic,
+      aggregateKey: integrationSyncJobTable.aggregateKey,
+      status: integrationSyncJobTable.status,
+      attemptCount: integrationSyncJobTable.attemptCount,
+      nextAttemptAt: integrationSyncJobTable.nextAttemptAt,
+      completedAt: integrationSyncJobTable.completedAt,
+      lastError: integrationSyncJobTable.lastError,
+      updatedAt: integrationSyncJobTable.updatedAt,
+    }).from(integrationSyncJobTable)
+      .orderBy(desc(integrationSyncJobTable.updatedAt))
+      .limit(Math.max(1, Math.min(100, Number(limit) || 30)));
   }
 
   async retryFailed(db: any): Promise<number> {

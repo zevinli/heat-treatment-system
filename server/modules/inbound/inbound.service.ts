@@ -306,7 +306,7 @@ export class InboundService {
       if (!productId) throw new BadRequestException(`产品不存在: ${(rawDetail as any).productCode || 'unknown'}`);
       const detail = { ...rawDetail, productId };
       // 创建明细
-      await tx.insert(inboundDetail).values({
+      const [createdDetail] = await tx.insert(inboundDetail).values({
         inboundId: order.id,
         productId: detail.productId,
         productName: detail.productName,
@@ -323,7 +323,7 @@ export class InboundService {
         techRequirement: detail.techRequirement || null,
         urgent: detail.urgent || false,
         attachments: detail.attachments,
-      });
+      }).returning({ id: inboundDetail.id });
 
       // 生成或使用传入的批次号
       const batchNo = detail.batchNo || this.generateBatchNo(customerRecord.code);
@@ -376,6 +376,20 @@ export class InboundService {
           eq(productTable.version, currentProduct?.version || 0)
         )).returning({ id: productTable.id });
       if (updated.length === 0) throw new ConflictException(`产品 ${detail.productName} 库存版本冲突，请重试`);
+
+      // 使用不可变明细 ID 作为幂等键。同一张来货单允许出现两行相同产品，
+      // 不能再用 productId，否则后一行会覆盖前一行的同步任务。
+      await this.feishuOutbox.enqueue(tx, 'inbound', `${order.id}:${createdDetail.id}`, {
+        orderId: order.inboundNo,
+        customerName: customerRecord.name,
+        productName: detail.productName,
+        quantity: detail.quantity,
+        weight: detail.weight,
+        createdAt: data.inboundDate,
+        createdBy: data.creator,
+        status: '已入库',
+        attachments: detail.attachments,
+      });
     }
 
     // 更新客户入库统计
@@ -398,19 +412,6 @@ export class InboundService {
       }),
       source: 'web',
     });
-    for (const detail of details) {
-      await this.feishuOutbox.enqueue(tx, 'inbound', `${order.id}:${detail.productId}`, {
-        orderId: order.inboundNo,
-        customerName: customerRecord.name,
-        productName: detail.productName,
-        quantity: detail.quantity,
-        weight: detail.weight,
-        createdAt: data.inboundDate,
-        createdBy: data.creator,
-        status: '已入库',
-        attachments: detail.attachments,
-      });
-    }
     return order;
     });
 
@@ -712,7 +713,7 @@ export class InboundService {
           originalInboundId: id, // 修复：关联原入库单ID
         });
 
-        await this.feishuOutbox.enqueue(tx, 'inbound', `${order.id}:${detail.productId}`, {
+        await this.feishuOutbox.enqueue(tx, 'inbound', `${order.id}:${detail.id}`, {
           orderId: order.inboundNo,
           customerName: order.customerName,
           productName: detail.productName,

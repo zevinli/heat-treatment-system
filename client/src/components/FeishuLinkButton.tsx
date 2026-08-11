@@ -24,7 +24,7 @@ import {
   type FeishuRuntimeConfig,
 } from '@/config/feishu-tables';
 
-function useFeishuRuntimeConfig() {
+export function useFeishuRuntimeConfig() {
   const { currentTenant } = useTenant();
   return useQuery<FeishuRuntimeConfig>({
     queryKey: ['feishu-runtime-tables', currentTenant?.orgCode],
@@ -56,6 +56,7 @@ interface FeishuContextButtonProps {
 
 export function FeishuContextButton({ pathname: propPathname }: FeishuContextButtonProps) {
   const location = useLocation();
+  const { currentTenant } = useTenant();
   const pathname = propPathname || location.pathname;
   const { data: config } = useFeishuRuntimeConfig();
   const match = getFeishuTableForPage(pathname, config);
@@ -79,7 +80,9 @@ export function FeishuContextButton({ pathname: propPathname }: FeishuContextBut
           onClick={handleClick}
         >
           <span className="text-sm">{table.icon}</span>
-          <span className="hidden sm:inline text-xs">在飞书中查看</span>
+          <span className="hidden sm:inline text-xs">
+            打开{currentTenant?.orgName ? `「${currentTenant.orgName} · ${table.tableName}」` : `飞书「${table.tableName}」`}
+          </span>
           <ExternalLink className="size-3" />
         </Button>
       </TooltipTrigger>
@@ -99,8 +102,11 @@ interface FeishuGlobalDropdownProps {
 }
 
 export function FeishuGlobalDropdown({ className }: FeishuGlobalDropdownProps) {
+  const { currentTenant } = useTenant();
   const { data: config } = useFeishuRuntimeConfig();
   const tables = getAllFeishuTableLinks(config);
+  const failed = Number(config?.syncQueue?.failed || 0);
+  const waiting = Number(config?.syncQueue?.pending || 0) + Number(config?.syncQueue?.processing || 0);
 
   const handleOpenTable = (url: string) => {
     window.open(url, '_blank', 'noopener,noreferrer');
@@ -116,9 +122,9 @@ export function FeishuGlobalDropdown({ className }: FeishuGlobalDropdownProps) {
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"
-              size="icon"
+              size="sm"
               className={className || 'size-9'}
-              aria-label="飞书多维表格"
+              aria-label={`${currentTenant?.orgName || '当前组织'}飞书多维表格`}
             >
               <svg
                 viewBox="0 0 24 24"
@@ -132,6 +138,8 @@ export function FeishuGlobalDropdown({ className }: FeishuGlobalDropdownProps) {
                 <line x1="7" y1="11" x2="17" y2="11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
                 <line x1="7" y1="15" x2="14" y2="15" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
               </svg>
+              <span className="hidden lg:inline text-xs">飞书</span>
+              <span className={failed > 0 ? 'size-2 rounded-full bg-error' : waiting > 0 ? 'size-2 rounded-full bg-warning' : 'size-2 rounded-full bg-success'} />
             </Button>
           </DropdownMenuTrigger>
         </TooltipTrigger>
@@ -143,9 +151,27 @@ export function FeishuGlobalDropdown({ className }: FeishuGlobalDropdownProps) {
             <path d="M4 3h11l5 5v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" strokeWidth="1.5" />
             <path d="M15 3v5h5" fill="none" stroke="currentColor" strokeWidth="1.5" />
           </svg>
-          飞书多维表格
+          {currentTenant?.orgName || '当前组织'} · 飞书业务表
         </DropdownMenuLabel>
+        <div className="px-2 pb-2 text-xs text-muted-foreground">
+          {failed > 0
+            ? `${failed} 条同步失败，可在同步中心重试`
+            : waiting > 0
+              ? `${waiting} 条正在等待同步`
+              : config?.lastSyncedAt
+                ? `同步正常 · ${new Date(config.lastSyncedAt).toLocaleString('zh-CN')}`
+                : '同步正常'}
+        </div>
         <DropdownMenuSeparator />
+        {config?.baseUrl && (
+          <>
+            <DropdownMenuItem onClick={() => handleOpenTable(config.baseUrl!)} className="cursor-pointer py-2.5 font-medium">
+              <ExternalLink className="mr-3 size-4 text-primary" />
+              打开当前组织整套业务表
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        )}
         {tables.map(({ key, table, url }) => (
           <DropdownMenuItem
             key={key}

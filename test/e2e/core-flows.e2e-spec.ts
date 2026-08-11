@@ -62,6 +62,14 @@ describe('生产接口核心流程与多租户隔离', () => {
       method: 'POST', token: loginB.token, body: { code: orgB, name: '接口审查乙企业' },
     }), 201).data;
 
+    const initialFeishu = expectStatus(await request('/api/integration/feishu/current/tables', {
+      token: loginA.token, orgCode: orgA,
+    }), 200).data;
+    expect(initialFeishu).toMatchObject({ configured: false, orgCode: orgA, tables: {} });
+    expectStatus(await request(`/api/integration/feishu/org/${orgB}/config`, {
+      token: loginA.token, orgCode: orgA,
+    }), 403);
+
     // 组织管理员只是租户管理员，不能读取平台全局账号或全部组织。
     expectStatus(await request('/api/auth/users', { token: loginA.token }), 403);
     expectStatus(await request('/api/tenant/organizations', { token: loginA.token }), 403);
@@ -168,6 +176,12 @@ describe('生产接口核心流程与多租户隔离', () => {
     expectStatus(await request(`/api/reconciliations/${reconciliation.id}/receipt`, {
       method: 'PUT', token: loginA.token, orgCode: orgA, body: { amount: 21 },
     }), 400);
+
+    // 业务先保存到租户数据库，再进入该租户自己的可靠飞书队列；未连接飞书也不丢任务。
+    const syncJobs = expectStatus(await request('/api/integration/feishu/current/jobs', {
+      token: loginA.token, orgCode: orgA,
+    }), 200).data.items;
+    expect(syncJobs.map((job: any) => job.topic)).toEqual(expect.arrayContaining(['customer', 'inbound', 'outbound', 'reconciliation']));
 
     // 物理隔离：乙组织看不到甲组织创建的客户；甲用户也不能借请求头访问乙组织。
     const orgBCustomers = expectStatus(await request('/api/customers?page=1&pageSize=100', {

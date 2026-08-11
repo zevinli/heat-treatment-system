@@ -6,6 +6,7 @@ import { BitableSyncService } from './bitable-sync.service';
 import { FeishuSchedulerService } from './feishu-scheduler.service';
 import { FeishuProvisioningService } from './feishu-provisioning.service';
 import { FeishuOutboxService } from './feishu-outbox.service';
+import { FeishuBackfillService } from './feishu-backfill.service';
 
 @Module({
   controllers: [FeishuController],
@@ -16,7 +17,8 @@ import { FeishuOutboxService } from './feishu-outbox.service';
     FeishuSchedulerService,
     FeishuProvisioningService,
     FeishuOutboxService,
+    FeishuBackfillService,
   ],
-  exports: [BitableSyncService, FeishuTenantConfigService, FeishuProvisioningService, FeishuOutboxService],
+  exports: [BitableSyncService, FeishuTenantConfigService, FeishuProvisioningService, FeishuOutboxService, FeishuBackfillService],
 })
 export class FeishuModule {}

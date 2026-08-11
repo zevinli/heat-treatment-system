@@ -40,11 +40,15 @@ import {
   MinusCircle,
   FileCheck,
   Hammer,
+  Cloud,
 } from 'lucide-react';
 import { useData } from '@/data/DataContext';
 import { cn } from '@/lib/utils';
 import { getChangeTypeConfig, isStockIncrease } from '@shared/inventory-change-types';
 import { useAppPermission } from '@/hooks/useAppPermission';
+import { useFeishuRuntimeConfig } from '@/components/FeishuLinkButton';
+import { useTenant } from '@/contexts/TenantContext';
+import { tenantScopedStorageKey } from '@/lib/tenant-storage';
 
 // KPI卡片组件
 interface KPICardProps {
@@ -549,8 +553,12 @@ const BusinessCompletionCard: React.FC<BusinessCompletionCardProps> = ({
 
 const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
+  const { currentTenant } = useTenant();
+  const warningStorageKey = tenantScopedStorageKey('dismissed_warnings', currentTenant?.orgCode);
   const canCreateInbound = useAppPermission('inbound:create');
   const canCreateOutbound = useAppPermission('outbound:create');
+  const canManageSettings = useAppPermission('system:settings');
+  const { data: feishuConfig, isLoading: feishuLoading } = useFeishuRuntimeConfig();
   const currentProfile = useCurrentUserProfile();
   const [currentDate, setCurrentDate] = useState<string>('');
   const [messageDialogOpen, setMessageDialogOpen] = useState(false);
@@ -558,7 +566,7 @@ const DashboardPage: React.FC = () => {
   
   const [dismissedWarnings, setDismissedWarnings] = useState<string[]>(() => {
     try {
-      const saved = localStorage.getItem('heat_treatment_dismissed_warnings');
+      const saved = localStorage.getItem(warningStorageKey);
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
@@ -749,10 +757,10 @@ const DashboardPage: React.FC = () => {
   const dismissWarning = useCallback((id: string) => {
     setDismissedWarnings(prev => {
       const newList = [...prev, id];
-      localStorage.setItem('heat_treatment_dismissed_warnings', JSON.stringify(newList));
+      localStorage.setItem(warningStorageKey, JSON.stringify(newList));
       return newList;
     });
-  }, []);
+  }, [warningStorageKey]);
 
   return (
     <div className="w-full max-w-[1600px] mx-auto space-y-8">
@@ -791,6 +799,30 @@ const DashboardPage: React.FC = () => {
           </Button>
         </div>
       </div>
+
+      {canManageSettings && !feishuLoading && !feishuConfig?.configured && (
+        <Card className="border-primary/20 bg-primary/5">
+          <CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <div className="rounded-lg bg-primary/10 p-2 text-primary"><Cloud className="size-5" /></div>
+              <div>
+                <p className="font-semibold">让业务数据自动同步到飞书</p>
+                <p className="text-sm text-muted-foreground">只需自动新建，或粘贴已有多维表格链接；不需要逐个查找 Table ID。</p>
+              </div>
+            </div>
+            <Button onClick={() => navigate('/settings/feishu')} className="shrink-0">连接飞书</Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {canManageSettings && Number(feishuConfig?.syncQueue?.failed || 0) > 0 && (
+        <Card className="border-error/30 bg-error/5">
+          <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div><p className="font-semibold text-error">有 {feishuConfig?.syncQueue?.failed} 条飞书同步失败</p><p className="text-sm text-muted-foreground">业务数据已经安全保存，不影响正常收发货；请进入同步中心查看原因。</p></div>
+            <Button variant="outline" onClick={() => navigate('/settings/feishu')}>查看并重试</Button>
+          </CardContent>
+        </Card>
+      )}
 
       {/* KPI卡片区域 */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

@@ -5,7 +5,7 @@ import { FeishuTenantConfigService, FeishuTenantConfig } from './feishu-tenant-c
 import { FEISHU_API_BASE, FIELD_NAMES, SYNC_CONFIG } from './constants';
 
 /**
- * 飞书多维表格自动开通服务 — 为组织自动创建多维表格和 7 张数据表
+ * 飞书多维表格自动开通服务 — 为组织创建五张核心表，可按需连接质检/工艺扩展表
  */
 @Injectable()
 export class FeishuProvisioningService {
@@ -25,6 +25,10 @@ export class FeishuProvisioningService {
     if (!orgCode?.trim() || !orgName?.trim()) {
       throw new BadRequestException('组织编码和组织名称不能为空');
     }
+    const existing = await this.configService.getConfig(orgCode);
+    if (existing?.bitableAppToken) {
+      throw new BadRequestException('当前组织已经绑定飞书表格。请使用现有连接，或先在高级设置中解绑后再新建');
+    }
     const token = await this.auth.getAccessToken();
     const client = axios.create({
       baseURL: FEISHU_API_BASE,
@@ -35,7 +39,7 @@ export class FeishuProvisioningService {
     // 1. 创建多维表格
     this.logger.log(`为组织 ${orgCode} 创建飞书多维表格...`);
     const bitableResp = await client.post('/bitable/v1/apps', {
-      name: `热处理-${orgName}`,
+      name: `热处理｜${orgName}｜${orgCode}`,
       folder_token: '', // 创建在根目录
     });
 
@@ -48,8 +52,10 @@ export class FeishuProvisioningService {
     const baseUrl = bitableResp.data.data.app.url || `https://feishu.cn/base/${appToken}`;
     this.logger.log(`多维表格创建成功：${appToken}`);
 
-    // 2. 依次创建 7 张数据表
-    const tableIds = await this.createTables(client, appToken);
+    // 2. 默认只创建每天实际使用的五张核心表。质检和工艺属于按需扩展，
+    // 未开通对应模块时不制造长期空白入口。
+    const tableIds = await this.createTables(client, appToken, false);
+    await this.removeDefaultTable(client, appToken, new Set(Object.values(tableIds)));
 
     // 3. 保存到数据库
     const config: FeishuTenantConfig = {
@@ -62,8 +68,8 @@ export class FeishuProvisioningService {
       tableInventory: tableIds.inventory,
       tableCustomer: tableIds.customer,
       tableReconciliation: tableIds.reconciliation,
-      tableQuality: tableIds.quality,
-      tableProcess: tableIds.process,
+      tableQuality: tableIds.quality || '',
+      tableProcess: tableIds.process || '',
     };
 
     await this.configService.saveConfig(orgCode, {
@@ -84,12 +90,13 @@ export class FeishuProvisioningService {
   }
 
   /**
-   * 创建 7 张业务表并返回各表 ID。任意表或字段创建失败都终止开通，
+   * 创建核心业务表并返回各表 ID。任意表或字段创建失败都终止开通，
    * 避免把不完整配置标记为已启用，随后所有业务同步持续失败。
    */
   private async createTables(
     client: any,
     appToken: string,
+    includeExtensions = false,
   ): Promise<Record<string, string>> {
     const tables: Array<{
       key: string;
@@ -98,7 +105,7 @@ export class FeishuProvisioningService {
     }> = [
       {
         key: 'inbound',
-        name: '来货登记表',
+        name: '01 来货登记',
         fields: [
           { field_name: FIELD_NAMES.inbound.orderId, type: 1 },
           { field_name: FIELD_NAMES.inbound.customerName, type: 1 },
@@ -113,7 +120,7 @@ export class FeishuProvisioningService {
       },
       {
         key: 'outbound',
-        name: '发货记录表',
+        name: '02 发货记录',
         fields: [
           { field_name: FIELD_NAMES.outbound.orderId, type: 1 },
           { field_name: FIELD_NAMES.outbound.customerName, type: 1 },
@@ -127,7 +134,7 @@ export class FeishuProvisioningService {
       },
       {
         key: 'inventory',
-        name: '库存快照表',
+        name: '03 库存快照',
         fields: [
           { field_name: FIELD_NAMES.inventory.productName, type: 1 },
           { field_name: FIELD_NAMES.inventory.material, type: 1 },
@@ -140,7 +147,7 @@ export class FeishuProvisioningService {
       },
       {
         key: 'customer',
-        name: '客户总览表',
+        name: '04 客户总览',
         fields: [
           { field_name: FIELD_NAMES.customer.code, type: 1 },
           { field_name: FIELD_NAMES.customer.name, type: 1 },
@@ -155,7 +162,7 @@ export class FeishuProvisioningService {
       },
       {
         key: 'reconciliation',
-        name: '每日对账表',
+        name: '05 对账与回款',
         fields: [
           { field_name: FIELD_NAMES.reconciliation.orderId, type: 1 },
           { field_name: FIELD_NAMES.reconciliation.date, type: 5 },
@@ -168,7 +175,7 @@ export class FeishuProvisioningService {
       },
       {
         key: 'quality',
-        name: '质检记录表',
+        name: '06 质检记录',
         fields: [
           { field_name: FIELD_NAMES.quality.batchNo, type: 1 },
           { field_name: FIELD_NAMES.quality.productName, type: 1 },
@@ -183,7 +190,7 @@ export class FeishuProvisioningService {
       },
       {
         key: 'process',
-        name: '工艺参数表',
+        name: '07 工艺参数',
         fields: [
           { field_name: FIELD_NAMES.process.batchNo, type: 1 },
           { field_name: FIELD_NAMES.process.productName, type: 1 },
@@ -202,7 +209,7 @@ export class FeishuProvisioningService {
 
     const result: Record<string, string> = {};
 
-    for (const table of tables) {
+    for (const table of tables.filter(table => includeExtensions || !['quality', 'process'].includes(table.key))) {
       const fields = table.fields.map(f => ({
         field_name: f.field_name,
         type: f.type,
@@ -241,5 +248,26 @@ export class FeishuProvisioningService {
     }
 
     return result;
+  }
+
+  /**
+   * 飞书新建多维表格时会附带一张空白“数据表”。业务表全部创建成功后清理它，
+   * 避免用户进入后看到无用途的第八张表。清理失败不影响已经可用的业务表。
+   */
+  private async removeDefaultTable(client: any, appToken: string, businessTableIds: Set<string>): Promise<void> {
+    try {
+      const response = await client.get(`/bitable/v1/apps/${appToken}/tables`, { params: { page_size: 100 } });
+      if (response.data.code !== 0) throw new Error(response.data.msg || String(response.data.code));
+      const defaults = (response.data.data?.items || []).filter((table: any) =>
+        !businessTableIds.has(table.table_id) && ['数据表', 'Table'].includes(String(table.name || '').trim()),
+      );
+      for (const table of defaults) {
+        const deleted = await client.delete(`/bitable/v1/apps/${appToken}/tables/${table.table_id}`);
+        if (deleted.data.code !== 0) throw new Error(deleted.data.msg || String(deleted.data.code));
+        this.logger.log(`已清理默认空白表：${table.table_id}`);
+      }
+    } catch (error: any) {
+      this.logger.warn(`清理飞书默认空白表失败，不影响业务表使用：${error.message}`);
+    }
   }
 }

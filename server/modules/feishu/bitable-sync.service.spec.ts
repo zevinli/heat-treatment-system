@@ -1,4 +1,5 @@
 import { BitableSyncService } from './bitable-sync.service';
+import { FEISHU_FIELD_TYPES } from './constants';
 
 describe('BitableSyncService', () => {
   const config = {
@@ -157,5 +158,48 @@ describe('BitableSyncService', () => {
       ]) }),
     );
     expect(client.delete).not.toHaveBeenCalled();
+  });
+
+  test('a pasted Bitable link discovers numbered core and optional tables automatically', async () => {
+    const { service, client } = setup();
+    client.get.mockResolvedValueOnce({ data: { code: 0, data: { items: [
+      { table_id: 'tbl-in', name: '01 来货登记' },
+      { table_id: 'tbl-out', name: '02 发货记录' },
+      { table_id: 'tbl-stock', name: '03 库存快照' },
+      { table_id: 'tbl-customer', name: '04 客户总览' },
+      { table_id: 'tbl-recon', name: '05 对账与回款' },
+      { table_id: 'tbl-quality', name: '06 质检记录' },
+      { table_id: 'tbl-process', name: '07 工艺参数' },
+    ] } } });
+
+    const result = await service.discoverTables('https://tenant.feishu.cn/base/app-token-a?table=tbl-in');
+    expect(result.appToken).toBe('app-token-a');
+    expect(result.baseUrl).toBe('https://tenant.feishu.cn/base/app-token-a');
+    expect(result.tables).toEqual({
+      inbound: 'tbl-in', outbound: 'tbl-out', inventory: 'tbl-stock',
+      customer: 'tbl-customer', reconciliation: 'tbl-recon',
+      quality: 'tbl-quality', process: 'tbl-process',
+    });
+    expect(result.missing).toEqual([]);
+  });
+
+  test('optional quality and process tables do not block core table validation', async () => {
+    const { service, client } = setup({ tableQuality: '', tableProcess: '' });
+    client.get.mockImplementation((url: string) => {
+      const fieldsByTable: Record<string, Record<string, number>> = {
+        'tbl-inbound': FEISHU_FIELD_TYPES.inbound,
+        'tbl-outbound': FEISHU_FIELD_TYPES.outbound,
+        'tbl-inventory': FEISHU_FIELD_TYPES.inventory,
+        'tbl-customer': FEISHU_FIELD_TYPES.customer,
+        'tbl-reconciliation': FEISHU_FIELD_TYPES.reconciliation,
+      };
+      const tableId = Object.keys(fieldsByTable).find(id => url.includes(id))!;
+      return Promise.resolve({ data: { code: 0, data: { items: Object.entries(fieldsByTable[tableId]).map(([field_name, type]) => ({ field_name, type })) } } });
+    });
+
+    const result = await service.validateTenantConfig('tenant-a');
+    expect(result.valid).toBe(true);
+    expect(result.tables).not.toHaveProperty('quality');
+    expect(result.tables).not.toHaveProperty('process');
   });
 });

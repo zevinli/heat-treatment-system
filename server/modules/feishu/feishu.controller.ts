@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param, Logger, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, Controller, Post, Get, Body, Param, Logger, ForbiddenException } from '@nestjs/common';
 import { CanRole, NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
 import { FeishuAuthService } from './feishu-auth.service';
 import { FeishuTenantConfigService } from './feishu-tenant-config.service';
@@ -7,6 +7,7 @@ import { getCurrentTenantContext } from '../../common/tenant-context.storage';
 import { CurrentTenantDb } from '../../common/decorators/tenant.decorator';
 import { FeishuOutboxService } from './feishu-outbox.service';
 import { BitableSyncService } from './bitable-sync.service';
+import { FeishuBackfillService, type BackfillScope } from './feishu-backfill.service';
 
 @Controller('api/integration/feishu')
 export class FeishuController {
@@ -18,6 +19,7 @@ export class FeishuController {
     private readonly provisioningService: FeishuProvisioningService,
     private readonly outboxService: FeishuOutboxService,
     private readonly bitableSyncService: BitableSyncService,
+    private readonly backfillService: FeishuBackfillService,
   ) {}
 
   private assertCurrentOrg(orgCode: string) {
@@ -52,6 +54,9 @@ export class FeishuController {
       };
     }
     const baseUrl = config.baseUrl || `https://feishu.cn/base/${config.bitableAppToken}`;
+    const [syncQueue, recentJobs] = db
+      ? await Promise.all([this.outboxService.getSummary(db), this.outboxService.getRecent(db, 50)])
+      : [undefined, []];
     return {
       configured: true,
       orgCode: tenant.orgCode,
@@ -65,7 +70,8 @@ export class FeishuController {
         quality: config.tableQuality,
         process: config.tableProcess,
       },
-      syncQueue: db ? await this.outboxService.getSummary(db) : undefined,
+      syncQueue,
+      lastSyncedAt: recentJobs.find((job: any) => job.status === 'completed')?.completedAt || null,
     };
   }
 
@@ -76,6 +82,15 @@ export class FeishuController {
   async retryFailed(@CurrentTenantDb() db: any) {
     if (!db) throw new ForbiddenException('请先选择组织');
     return { retried: await this.outboxService.retryFailed(db) };
+  }
+
+  /** 当前租户最近的同步任务，供管理员定位失败原因。 */
+  @NeedLogin()
+  @CanRole('system:permission')
+  @Get('current/jobs')
+  async currentJobs(@CurrentTenantDb() db: any) {
+    if (!db) throw new ForbiddenException('请先选择组织');
+    return { items: await this.outboxService.getRecent(db) };
   }
 
   @NeedLogin()
@@ -97,6 +112,29 @@ export class FeishuController {
     return this.bitableSyncService.repairTenantFields(tenant.orgCode);
   }
 
+  /** 粘贴一个飞书链接即可自动识别其中的业务表。 */
+  @NeedLogin()
+  @CanRole('system:permission')
+  @Post('current/discover')
+  async discoverCurrent(@Body() body: { url?: string; appToken?: string }) {
+    const tenant = getCurrentTenantContext();
+    if (!tenant) throw new ForbiddenException('请先选择组织');
+    return this.bitableSyncService.discoverTables(body?.url || body?.appToken || '');
+  }
+
+  /** 首次连接或换表后，按管理员选择的范围补齐历史业务数据。 */
+  @NeedLogin()
+  @CanRole('system:permission')
+  @Post('current/backfill')
+  async backfillCurrent(
+    @CurrentTenantDb() db: any,
+    @Body() body: { scope?: BackfillScope },
+  ) {
+    const tenant = getCurrentTenantContext();
+    if (!tenant || !db) throw new ForbiddenException('请先选择组织');
+    return this.backfillService.enqueue(tenant.orgCode, db, body?.scope || '90d');
+  }
+
   /** 查询指定组织的飞书配置 */
   @NeedLogin()
   @CanRole('system:permission')
@@ -116,7 +154,26 @@ export class FeishuController {
     @Body() body: any,
   ) {
     this.assertCurrentOrg(orgCode);
+    const existing = await this.configService.getConfig(orgCode);
+    const identityKeys = ['bitableAppToken', 'tableInbound', 'tableOutbound', 'tableInventory', 'tableCustomer', 'tableReconciliation', 'tableQuality', 'tableProcess'] as const;
+    const bindingChanged = identityKeys.some(key =>
+      String(body?.[key] ?? '') !== String(existing?.[key] ?? ''),
+    );
     await this.configService.saveConfig(orgCode, body);
+    if (body?.isActive && (!existing?.isActive || bindingChanged)) {
+      const validation = await this.bitableSyncService.validateTenantConfig(orgCode);
+      if (!validation.valid) {
+        // 新连接校验失败时保持停用；修改既有连接失败时恢复原配置，避免一次误填
+        // 让原本正常运行的同步立即中断。
+        if (existing) await this.configService.saveConfig(orgCode, existing);
+        else await this.configService.saveConfig(orgCode, { ...body, isActive: false });
+        const details = Object.entries(validation.tables || {})
+          .filter(([, result]: any) => !result.valid)
+          .map(([key, result]: any) => `${key}${result.error ? `：${result.error}` : result.missingFields?.length ? `缺少字段 ${result.missingFields.join('、')}` : '字段类型不正确'}`)
+          .join('；');
+        throw new BadRequestException(`飞书表结构校验未通过，未启用同步：${validation.error || details || '请检查表格权限和字段'}`);
+      }
+    }
     return { success: true };
   }
 

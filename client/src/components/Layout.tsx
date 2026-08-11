@@ -99,6 +99,7 @@ import { DataProvider } from "@/data/DataContext";
 import { useData } from "@/data/DataContext";
 import { useTenant } from "@/contexts/TenantContext";
 import { FeishuContextButton, FeishuGlobalDropdown } from "@/components/FeishuLinkButton";
+import { NetworkStatusBanner } from '@/components/NetworkStatusBanner';
 import { checkPermission, restoreAccountRole } from '@/lib/auth-session';
 
 // ==================== 导航配置 - 优化后的扁平结构 ====================
@@ -625,6 +626,7 @@ const Breadcrumb = ({ pathname }: { pathname: string }) => {
 // 顶部标题栏组件 - 全新极简设计
 const Header = ({ pathname }: { pathname: string }) => {
   const navigate = useNavigate();
+  const { currentTenant } = useTenant();
   const [searchOpen, setSearchOpen] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -677,6 +679,18 @@ const Header = ({ pathname }: { pathname: string }) => {
               aria-label="打开导航菜单"
               title="打开导航菜单"
             />
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mr-1 max-w-36 gap-1.5 px-2 text-xs font-medium sm:max-w-52"
+              onClick={() => navigate('/organizations')}
+              title="切换当前组织"
+            >
+              <Building2 className="size-4 shrink-0 text-primary" />
+              <span className="truncate">{currentTenant?.orgName || '选择组织'}</span>
+              <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+            </Button>
+            <Separator orientation="vertical" className="mr-2 h-4" />
             <Breadcrumb pathname={pathname} />
           </div>
 
@@ -695,6 +709,9 @@ const Header = ({ pathname }: { pathname: string }) => {
                 <span className="text-xs">⌘</span>K
               </kbd>
             </Button>
+
+            {/* 当前组织的飞书业务表入口；未配置时组件自动隐藏。 */}
+            <FeishuGlobalDropdown className="h-8 min-w-8 px-2" />
             
             {/* 分隔线 */}
             <Separator orientation="vertical" className="h-4 mx-1" />
@@ -704,6 +721,8 @@ const Header = ({ pathname }: { pathname: string }) => {
               variant="ghost" 
               size="icon" 
               className="h-8 w-8 relative"
+              aria-label={`消息通知${totalNotifications > 0 ? `，${totalNotifications}条` : ''}`}
+              title="消息通知"
               onClick={() => {
                 setNotificationOpen(true);
                 setLastReadNotificationCount(totalNotifications);
@@ -720,6 +739,8 @@ const Header = ({ pathname }: { pathname: string }) => {
               variant="ghost" 
               size="icon" 
               className="h-8 w-8"
+              aria-label="打开使用手册"
+              title="打开使用手册"
               onClick={() => navigate('/settings/manual')}
             >
               <HelpCircle className="size-4" />
@@ -908,6 +929,7 @@ const Layout = () => {
           
           <main className="flex-1 flex flex-col min-w-0">
             <Header pathname={pathname} />
+            <NetworkStatusBanner />
             <PageTitle pathname={pathname} />
             
             <div className="flex-1 p-4 sm:p-6 overflow-auto">

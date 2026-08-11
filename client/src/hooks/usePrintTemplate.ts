@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { tenantScopedStorageKey } from '@/lib/tenant-storage';
 
 // 字段对齐方式
 export type FieldAlign = 'left' | 'center' | 'right';
@@ -132,7 +133,10 @@ const STORAGE_KEYS = {
   deliveryNote: 'deliveryNote',
   reconciliation: 'reconciliation',
 };
-const GLOBAL_STORAGE_KEY = '__global_heat_print_templates';
+const getTemplateStorageKey = () => tenantScopedStorageKey(
+  'print_templates',
+  typeof window === 'undefined' ? null : localStorage.getItem('currentOrgCode'),
+);
 const LEGACY_STORAGE_KEYS: Record<string, string> = {
   processCard: 'print_template_process_card',
   deliveryNote: 'print_template_delivery_note',
@@ -142,7 +146,7 @@ const LEGACY_STORAGE_KEYS: Record<string, string> = {
 // 获取存储的模板配置
 const getStoredTemplate = (key: string, defaultConfig: ITemplateConfig): ITemplateConfig => {
   try {
-    const registry = localStorage.getItem(GLOBAL_STORAGE_KEY);
+    const registry = localStorage.getItem(getTemplateStorageKey());
     if (registry) {
       const parsed = JSON.parse(registry);
       if (parsed?.[key]) return { ...defaultConfig, ...parsed[key] };
@@ -163,8 +167,9 @@ const getStoredTemplate = (key: string, defaultConfig: ITemplateConfig): ITempla
 // 保存模板配置到存储
 const saveTemplateToStorage = (key: string, config: ITemplateConfig) => {
   try {
-    const current = JSON.parse(localStorage.getItem(GLOBAL_STORAGE_KEY) || '{}');
-    localStorage.setItem(GLOBAL_STORAGE_KEY, JSON.stringify({ ...current, [key]: config }));
+    const storageKey = getTemplateStorageKey();
+    const current = JSON.parse(localStorage.getItem(storageKey) || '{}');
+    localStorage.setItem(storageKey, JSON.stringify({ ...current, [key]: config }));
   } catch {
     // ignore
   }

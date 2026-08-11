@@ -112,11 +112,42 @@ export class FeishuTenantConfigService {
       tableQuality: text(config.tableQuality, existing?.tableQuality),
       tableProcess: text(config.tableProcess, existing?.tableProcess),
     };
-    if (merged.baseUrl && !/^https:\/\//i.test(merged.baseUrl)) throw new BadRequestException('飞书访问地址必须使用 https://');
+    if (merged.baseUrl) {
+      let url: URL;
+      try { url = new URL(merged.baseUrl); } catch { throw new BadRequestException('飞书访问地址格式不正确'); }
+      const host = url.hostname.toLowerCase();
+      const trusted = host === 'feishu.cn' || host.endsWith('.feishu.cn') || host === 'larksuite.com' || host.endsWith('.larksuite.com');
+      if (url.protocol !== 'https:' || !trusted || !url.pathname.includes('/base/')) {
+        throw new BadRequestException('请输入可信的飞书多维表格 https://.../base/... 地址');
+      }
+    }
     const identifiers = [merged.bitableAppToken, merged.tableInbound, merged.tableOutbound, merged.tableInventory,
       merged.tableCustomer, merged.tableReconciliation, merged.tableQuality, merged.tableProcess].filter(Boolean);
     if (identifiers.some(value => !/^[A-Za-z0-9_-]{3,255}$/.test(value))) {
       throw new BadRequestException('App Token 或数据表 ID 格式不正确');
+    }
+    // 一组织一套飞书多维表格。人工配置时也禁止复用其他组织的 App Token
+    // 或任意业务表 ID，避免误配置造成跨租户数据写入。
+    const organizations = await this.db
+      .select({ code: organization.code, feishuConfig: organization.feishuConfig })
+      .from(organization);
+    const incomingIdentifiers = new Set(identifiers);
+    for (const row of organizations) {
+      if (row.code === orgCode || !row.feishuConfig) continue;
+      const other = row.feishuConfig as any;
+      const otherIdentifiers = [
+        other.bitableAppToken,
+        other.tableInbound,
+        other.tableOutbound,
+        other.tableInventory,
+        other.tableCustomer,
+        other.tableReconciliation,
+        other.tableQuality,
+        other.tableProcess,
+      ].filter(Boolean);
+      if (otherIdentifiers.some((value: string) => incomingIdentifiers.has(value))) {
+        throw new BadRequestException(`该飞书多维表格已绑定到组织“${row.code}”，不能重复绑定`);
+      }
     }
     if (merged.isActive && (!merged.bitableAppToken || !merged.tableInbound || !merged.tableOutbound || !merged.tableInventory || !merged.tableCustomer || !merged.tableReconciliation)) {
       throw new BadRequestException('启用飞书同步前必须填写 App Token 和五个业务表 ID');

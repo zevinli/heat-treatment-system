@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 
 interface TenantInfo {
   orgId: string;
@@ -16,6 +17,7 @@ interface TenantContextType {
 const TenantContext = createContext<TenantContextType | null>(null);
 
 export const TenantProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const queryClient = useQueryClient();
   const [currentTenant, setCurrentTenantState] = useState<TenantInfo | null>(() => {
     // 从 localStorage 初始化
     if (typeof window !== 'undefined') {
@@ -30,6 +32,18 @@ export const TenantProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   });
 
   const setCurrentTenant = (tenant: TenantInfo | null) => {
+    const previousOrgCode = currentTenant?.orgCode || null;
+    const nextOrgCode = tenant?.orgCode || null;
+    if (previousOrgCode !== nextOrgCode) {
+      // 查询缓存中包含客户、库存、权限和飞书链接。切换组织时必须立即清空，
+      // 不能在新组织页面短暂展示上一组织的数据或链接。
+      queryClient.clear();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('heat-treatment:tenant-changed', {
+          detail: { previousOrgCode, nextOrgCode },
+        }));
+      }
+    }
     setCurrentTenantState(tenant);
     if (tenant) {
       localStorage.setItem('currentOrgId', tenant.orgId);

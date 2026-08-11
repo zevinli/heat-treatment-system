@@ -44,6 +44,8 @@ export function ThemeSwitcher({
         <Button 
           variant={variant} 
           size={size}
+          aria-label={`切换界面主题，当前为${config.label}`}
+          title={`切换界面主题，当前为${config.label}`}
           className={cn(
             "relative overflow-hidden transition-all duration-300",
             size === 'icon' ? 'h-9 w-9' : 'h-9 px-3',

@@ -21,3 +21,19 @@ html .no-theme-transition *::before,
 html .no-theme-transition *::after {
   transition: none !important;
 }
+
+/* 工厂现场常用手机、平板和触控屏：确保操作目标足够大，戴手套也能可靠点击。 */
+@media (pointer: coarse), (max-width: 767px) {
+  button,
+  [role="button"],
+  input:not([type="checkbox"]):not([type="radio"]),
+  select {
+    min-height: 44px;
+  }
+
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}

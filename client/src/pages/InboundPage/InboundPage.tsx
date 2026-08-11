@@ -45,6 +45,8 @@ import { StepProgress } from '@/pages/StepProgressPage/StepProgressPage';
 import { EditableSelect } from '@/components/EditableSelect';
 import * as XLSX from '@e965/xlsx';
 import { logger } from '@lark-apaas/client-toolkit/logger';
+import { useTenant } from '@/contexts/TenantContext';
+import { readTenantScopedJson, tenantScopedStorageKey, writeTenantScopedJson } from '@/lib/tenant-storage';
 
 // 注意：入库单号由后端自动生成，格式为 RK + 年月日 + 3位序号
 // 前端无需传 inboundNo 字段
@@ -88,6 +90,10 @@ const formatCountdown = (ms: number): string => {
 
 const InboundPage: React.FC = () => {
   const navigate = useNavigate();
+  const { currentTenant } = useTenant();
+  const operationDefaults = readTenantScopedJson('operation_defaults', currentTenant?.orgCode, {
+    creator: '收发', transporter: '', plateNumber: '', driver: '',
+  });
   const { 
     customers: rawCustomers, 
     products: rawProducts, 
@@ -118,12 +124,12 @@ const InboundPage: React.FC = () => {
   // 步骤3：入库单信息
   const [inboundDate, setInboundDate] = useState(new Date().toISOString().split('T')[0]);
   const [inboundTime, setInboundTime] = useState(new Date().toTimeString().slice(0, 5));
-  const [creator, setCreator] = useState('收发');
+  const [creator, setCreator] = useState(operationDefaults.creator);
   const [internalCode, setInternalCode] = useState('');
   const [receiver, setReceiver] = useState('');
-  const [transporter, setTransporter] = useState('');
-  const [plateNumber, setPlateNumber] = useState('');
-  const [driver, setDriver] = useState('');
+  const [transporter, setTransporter] = useState(operationDefaults.transporter);
+  const [plateNumber, setPlateNumber] = useState(operationDefaults.plateNumber);
+  const [driver, setDriver] = useState(operationDefaults.driver);
   const [selfCode, setSelfCode] = useState('');
   const [handler, setHandler] = useState('');
   const [handleTime, setHandleTime] = useState(new Date().toLocaleString('zh-CN'));
@@ -729,6 +735,7 @@ const InboundPage: React.FC = () => {
 
   // 保存入库单并打印 - 创建入库单、更新库存、打开打印弹窗
   const [isSaving, setIsSaving] = useState(false);
+  const saveLockRef = useRef(false);
 
   const handleSaveAndPrint = async () => {
     if (inboundDetails.length === 0) {
@@ -747,8 +754,13 @@ const InboundPage: React.FC = () => {
       }
     }
 
-    // 防止重复提交
-    if (isSaving) return;
+    if (!navigator.onLine) {
+      toast.warning('当前网络不可用，内容已保存在本组织草稿中；网络恢复后再提交');
+      return;
+    }
+    // 状态更新前也用同步锁拦截双击，避免极短时间内生成两张业务单。
+    if (isSaving || saveLockRef.current) return;
+    saveLockRef.current = true;
     setIsSaving(true);
 
     // 创建入库单记录（单号由后端生成）
@@ -790,14 +802,18 @@ const InboundPage: React.FC = () => {
       setRecentInboundOrders(prev => [orderInfo, ...prev].slice(0, 5));
       setUndoCountdowns(prev => ({ ...prev, [newOrder.id]: 5 * 60 * 1000 }));
       
-      toast.success(`入库单 ${newOrder.inboundNo} 保存成功，库存已更新`);
+      clearDraft();
+      writeTenantScopedJson('operation_defaults', currentTenant?.orgCode, { creator, transporter, plateNumber, driver });
+      toast.success(`入库单 ${newOrder.inboundNo} 保存成功，库存已更新；飞书将自动同步`);
       setPrintDialogOpen(true);
       } catch (error) {
         toast.error('保存失败：' + (error instanceof Error ? error.message : '未知错误'));
       } finally {
+        saveLockRef.current = false;
         setIsSaving(false);
       }
     } else {
+      saveLockRef.current = false;
       setIsSaving(false);
     }
   };
@@ -896,7 +912,7 @@ const InboundPage: React.FC = () => {
   ];
 
   // 本地暂存相关
-  const STORAGE_KEY = 'inbound_draft';
+  const STORAGE_KEY = tenantScopedStorageKey('inbound_draft', currentTenant?.orgCode);
   const [hasDraft, setHasDraft] = useState(false);
   const [showDraftBanner, setShowDraftBanner] = useState(false);
   const [draftTimestamp, setDraftTimestamp] = useState<number | null>(null);
@@ -921,12 +937,13 @@ const InboundPage: React.FC = () => {
         localStorage.removeItem(STORAGE_KEY);
       }
     }
-  }, []);
+  }, [STORAGE_KEY]);
   
   // 自动保存草稿
   useEffect(() => {
     if (currentStep > 1 && selectedCustomer) {
       const draft = {
+        orgCode: currentTenant?.orgCode,
         currentStep,
         selectedCustomer,
         inboundDetails,
@@ -941,7 +958,7 @@ const InboundPage: React.FC = () => {
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
     }
-  }, [currentStep, selectedCustomer, inboundDetails, inboundDate, inboundTime, creator, receiver, transporter, plateNumber, driver]);
+  }, [STORAGE_KEY, currentTenant?.orgCode, currentStep, selectedCustomer, inboundDetails, inboundDate, inboundTime, creator, receiver, transporter, plateNumber, driver]);
   
   // 恢复草稿
   const restoreDraft = (draft: any, silent = false) => {

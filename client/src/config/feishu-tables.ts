@@ -12,6 +12,8 @@ export interface FeishuRuntimeConfig {
   orgCode: string;
   baseUrl?: string;
   tables: Partial<Record<keyof typeof FEISHU_TABLES, string>>;
+  syncQueue?: Record<'pending' | 'processing' | 'failed' | 'completed', number>;
+  lastSyncedAt?: string | null;
 }
 
 export function buildFeishuTableUrl(baseUrl: string, tableId: string): string {
