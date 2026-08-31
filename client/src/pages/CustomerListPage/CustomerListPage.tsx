@@ -54,6 +54,7 @@ import type { Customer } from '@shared/api.interface';
 import { useData } from '@/data/DataContext';
 import { useAppPermission } from '@/hooks/useAppPermission';
 import { useTenant } from '@/contexts/TenantContext';
+import { decodeTextFile } from '@/utils/file-encoding';
 
 // 表单数据类型
 interface ICustomerFormData {
@@ -1160,7 +1161,10 @@ const ImportCustomerDialog: React.FC<ImportCustomerDialogProps> = ({
     setIsParsing(true);
     try {
       const XLSX = await import('@e965/xlsx');
-      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+      const workbook = XLSX.read(
+        extension === 'csv' ? await decodeTextFile(file) : await file.arrayBuffer(),
+        { type: extension === 'csv' ? 'string' : 'array', cellDates: true },
+      );
       let bestCandidate: { sheetName: string; rows: unknown[][]; headerIndex: number; mapping: Record<number, string>; score: number } | null = null;
 
       for (const sheetName of workbook.SheetNames) {

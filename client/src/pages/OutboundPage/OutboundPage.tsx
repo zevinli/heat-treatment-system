@@ -314,10 +314,6 @@ const OutboundPage: React.FC = () => {
       return;
     }
 
-    if (!navigator.onLine) {
-      toast.warning('当前网络不可用，内容已保存在本组织草稿中；网络恢复后再提交');
-      return;
-    }
     if (isSaving || saveLockRef.current) return;
     saveLockRef.current = true;
     setIsSaving(true);
@@ -901,7 +897,12 @@ const OutboundPage: React.FC = () => {
             </div>
 
             {/* 出库明细表格 */}
-            <div className="border rounded-lg overflow-hidden">
+            <div
+              className="border rounded-lg overflow-x-auto"
+              role="region"
+              aria-label="出库明细，可横向滚动"
+              tabIndex={0}
+            >
               <table className="w-full">
                 <thead className="bg-muted">
                   <tr>

@@ -842,10 +842,6 @@ const InboundPage: React.FC = () => {
       return;
     }
 
-    if (!navigator.onLine) {
-      toast.warning('当前网络不可用，内容已保存在本组织草稿中；网络恢复后再提交');
-      return;
-    }
     // 状态更新前也用同步锁拦截双击，避免极短时间内生成两张业务单。
     if (isSaving || saveLockRef.current) return;
     saveLockRef.current = true;
@@ -1564,7 +1560,12 @@ const InboundPage: React.FC = () => {
             </div>
 
             {/* 入库明细表格 */}
-            <div className="border rounded-lg overflow-hidden">
+            <div
+              className="border rounded-lg overflow-x-auto"
+              role="region"
+              aria-label="入库明细，可横向滚动"
+              tabIndex={0}
+            >
               <table className="w-full">
                 <thead className="bg-muted">
                   <tr>

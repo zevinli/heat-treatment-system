@@ -1,5 +1,6 @@
 import * as XLSX from '@e965/xlsx';
 import type { IProduct } from '@/data/mockData';
+import { decodeTextFile } from '@/utils/file-encoding';
 
 export type InboundImportField =
   | 'productCode'
@@ -341,10 +342,14 @@ export async function analyzeInboundImportFile(
   if (file.size > 10 * 1024 * 1024) throw new Error('文件不能超过10MB');
   const lowerName = file.name.toLowerCase();
   if (lowerName.endsWith('.txt')) {
-    return analyzeInboundMatrix(textToMatrix(await file.text()), products, customerCode, { fileName: file.name, sheetName: '文本清单' });
+    return analyzeInboundMatrix(textToMatrix(await decodeTextFile(file)), products, customerCode, { fileName: file.name, sheetName: '文本清单' });
   }
   if (!/\.(xlsx|xls|csv)$/i.test(lowerName)) throw new Error('仅支持 Excel（.xlsx/.xls）、CSV 或 TXT 清单');
-  const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+  const isCsv = lowerName.endsWith('.csv');
+  const workbook = XLSX.read(
+    isCsv ? await decodeTextFile(file) : await file.arrayBuffer(),
+    { type: isCsv ? 'string' : 'array', cellDates: true },
+  );
   const sheetErrors: Error[] = [];
   const analyses = workbook.SheetNames.flatMap(sheetName => {
     const sheet = workbook.Sheets[sheetName];

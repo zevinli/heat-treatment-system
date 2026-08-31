@@ -70,6 +70,30 @@ describe('inbound list intelligent import', () => {
     });
   });
 
+  it('preserves UTF-8 Chinese in CSV files without requiring a BOM', async () => {
+    const analysis = await analyzeInboundImportFile(mockFile(
+      '客户清单.csv',
+      '客户来货清单\n\n品名,材料牌号,热处理工艺,数量,重量,计价单位,单价\n齿轮轴,40Cr,调质,3,4.5,件,12',
+    ), products, 'TENANT-A');
+
+    expect(analysis.headerRowNumber).toBe(3);
+    expect(analysis.rows).toHaveLength(1);
+    expect(analysis.rows[0]).toMatchObject({
+      productName: '齿轮轴', matchedProductId: 'product-a', quantity: 3, weight: 4.5, unitPrice: 12, issues: [],
+    });
+  });
+
+  it('decodes GBK/GB18030 CSV files exported by Windows Excel', async () => {
+    const bytes = Uint8Array.from([
+      0xc6, 0xb7, 0xc3, 0xfb, 0x2c, 0xca, 0xfd, 0xc1, 0xbf, 0x0a,
+      0xd0, 0xc2, 0xc6, 0xb7, 0x2c, 0x32,
+    ]);
+    const analysis = await analyzeInboundImportFile(mockFile('Windows清单.csv', bytes.buffer), products, 'TENANT-A');
+
+    expect(analysis.rows).toHaveLength(1);
+    expect(analysis.rows[0]).toMatchObject({ productName: '新品', quantity: 2, issues: [] });
+  });
+
   it('rejects oversized matrices before rendering thousands of editable rows', () => {
     const matrix = [
       ['产品名称', '数量'],

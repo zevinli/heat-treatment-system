@@ -1,27 +1,62 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CloudOff, Wifi } from 'lucide-react';
 
 export function NetworkStatusBanner() {
-  const [online, setOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine);
+  // navigator.onLine 在 WebView、代理和部分工厂内网环境中经常误报。
+  // 业务能否保存取决于应用后端是否可达，因此用同源健康检查作为最终依据。
+  const [online, setOnline] = useState(true);
   const [recovered, setRecovered] = useState(false);
+  const onlineRef = useRef(true);
 
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const handleOffline = () => {
-      setRecovered(false);
-      setOnline(false);
+    let active = true;
+    let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+    let probeController: AbortController | undefined;
+
+    const updateOnline = (nextOnline: boolean, showRecovery: boolean) => {
+      if (!active) return;
+      const wasOnline = onlineRef.current;
+      onlineRef.current = nextOnline;
+      setOnline(nextOnline);
+      if (!nextOnline) {
+        setRecovered(false);
+      } else if (showRecovery && !wasOnline) {
+        setRecovered(true);
+        if (recoveryTimer) clearTimeout(recoveryTimer);
+        recoveryTimer = setTimeout(() => setRecovered(false), 4000);
+      }
     };
-    const handleOnline = () => {
-      setOnline(true);
-      setRecovered(true);
-      timer = setTimeout(() => setRecovered(false), 4000);
+
+    const probeBackend = async (showRecovery = true) => {
+      probeController?.abort();
+      probeController = new AbortController();
+      const timeout = window.setTimeout(() => probeController?.abort(), 5000);
+      try {
+        const response = await fetch('/api/health', {
+          cache: 'no-store',
+          credentials: 'same-origin',
+          signal: probeController.signal,
+        });
+        updateOnline(response.ok, showRecovery);
+      } catch {
+        updateOnline(false, false);
+      } finally {
+        window.clearTimeout(timeout);
+      }
     };
-    window.addEventListener('offline', handleOffline);
-    window.addEventListener('online', handleOnline);
+
+    const handleNetworkChange = () => { void probeBackend(true); };
+    void probeBackend(false);
+    const probeInterval = window.setInterval(() => { void probeBackend(true); }, 30000);
+    window.addEventListener('offline', handleNetworkChange);
+    window.addEventListener('online', handleNetworkChange);
     return () => {
-      window.removeEventListener('offline', handleOffline);
-      window.removeEventListener('online', handleOnline);
-      if (timer) clearTimeout(timer);
+      active = false;
+      probeController?.abort();
+      window.clearInterval(probeInterval);
+      window.removeEventListener('offline', handleNetworkChange);
+      window.removeEventListener('online', handleNetworkChange);
+      if (recoveryTimer) clearTimeout(recoveryTimer);
     };
   }, []);
 
