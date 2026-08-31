@@ -1,1 +1,0 @@
-const e={debug:(...o)=>console.debug("[HeatFlow]",...o),info:(...o)=>console.info("[HeatFlow]",...o),warn:(...o)=>console.warn("[HeatFlow]",...o),error:(...o)=>console.error("[HeatFlow]",...o),log:(...o)=>console.log("[HeatFlow]",...o)};export{e as l};
