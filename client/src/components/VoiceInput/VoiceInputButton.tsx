@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Mic, Square, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -70,6 +70,10 @@ export const VoiceInputButton: React.FC<VoiceInputButtonProps> = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [interimText, setInterimText] = useState('');
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const finalTextRef = useRef('');
+  const interimTextRef = useRef('');
+  const deliveredRef = useRef(false);
+  const recognitionFailedRef = useRef(false);
 
   const startRecording = useCallback(() => {
     const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -81,6 +85,10 @@ export const VoiceInputButton: React.FC<VoiceInputButtonProps> = ({
 
     try {
       const recognition = new SpeechRecognitionAPI();
+      finalTextRef.current = '';
+      interimTextRef.current = '';
+      deliveredRef.current = false;
+      recognitionFailedRef.current = false;
       recognition.lang = 'zh-CN';
       recognition.continuous = true;
       recognition.interimResults = true;
@@ -106,17 +114,21 @@ export const VoiceInputButton: React.FC<VoiceInputButtonProps> = ({
         }
 
         if (interimTranscript) {
+          interimTextRef.current = interimTranscript;
           setInterimText(interimTranscript);
         }
 
         if (finalTranscript) {
+          finalTextRef.current += finalTranscript;
+          deliveredRef.current = true;
           setIsProcessing(true);
           recognition.stop();
-          onResult(finalTranscript);
+          onResult(finalTextRef.current);
         }
       };
 
       recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+        recognitionFailedRef.current = true;
         logger.error('语音识别错误:', event.error);
         let errorMessage = '语音识别失败';
         
@@ -146,6 +158,15 @@ export const VoiceInputButton: React.FC<VoiceInputButtonProps> = ({
       };
 
       recognition.onend = () => {
+        // 用户主动点击停止时，浏览器可能只给出 interimResult。此前这段文字会
+        // 被直接清空，表现为“说了话但没有录入”；现在将其作为最终结果交付。
+        if (!recognitionFailedRef.current && !deliveredRef.current) {
+          const text = (finalTextRef.current || interimTextRef.current).trim();
+          if (text) {
+            deliveredRef.current = true;
+            onResult(text);
+          }
+        }
         setIsRecording(false);
         setIsProcessing(false);
         setInterimText('');
@@ -174,6 +195,17 @@ export const VoiceInputButton: React.FC<VoiceInputButtonProps> = ({
     }
   };
 
+  useEffect(() => () => {
+    const recognition = recognitionRef.current;
+    if (!recognition) return;
+    recognition.onstart = null;
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
+    recognition.abort();
+    recognitionRef.current = null;
+  }, []);
+
   return (
     <div className={cn("relative", className)}>
       <Button
@@ -199,14 +231,14 @@ export const VoiceInputButton: React.FC<VoiceInputButtonProps> = ({
       {/* 录音中波纹动画 */}
       {isRecording && (
         <>
-          <span className="absolute -inset-1 rounded-full animate-ping bg-destructive/20" />
-          <span className="absolute -inset-2 rounded-full animate-ping bg-destructive/10 animation-delay-200" />
+          <span className="pointer-events-none absolute -inset-1 rounded-full animate-ping bg-destructive/20" />
+          <span className="pointer-events-none absolute -inset-2 rounded-full animate-ping bg-destructive/10 animation-delay-200" />
         </>
       )}
 
       {/* 实时转写提示 */}
       {isRecording && interimText && (
-        <div className="absolute left-full ml-3 top-1/2 -translate-y-1/2 whitespace-nowrap">
+        <div className="pointer-events-none absolute left-full ml-3 top-1/2 -translate-y-1/2 whitespace-nowrap">
           <div className="bg-popover text-popover-foreground px-3 py-1.5 rounded-md text-sm shadow-md border">
             {interimText}
             <span className="animate-pulse">|</span>

@@ -23,7 +23,7 @@ import {
   ImagePlus,
 } from 'lucide-react';
 import { exportToExcel } from '@/lib/excel-export';
-import { smartPrint } from '@/lib/print-service';
+import { exportElementToPdf, smartPrint } from '@/lib/print-service';
 import { useProcessCardTemplate, type ITemplateConfig, type ITemplateField } from '@/hooks/usePrintTemplate';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -40,11 +40,10 @@ import { useData } from '@/data/DataContext';
 import type { ICustomer, IProduct, ProductStatus } from '@/data/mockData';
 import { VoiceInputPanel } from '@/components/VoiceInput';
 import { AIRecognitionDialog, type AIRecognitionResult } from '@/components/AIRecognitionDialog';
+import { InboundListImportDialog, type ResolvedInboundImportRow } from '@/components/InboundListImportDialog';
 import type { VoiceParseResult } from '@/api';
 import { StepProgress } from '@/pages/StepProgressPage/StepProgressPage';
 import { EditableSelect } from '@/components/EditableSelect';
-import * as XLSX from '@e965/xlsx';
-import { logger } from '@lark-apaas/client-toolkit/logger';
 import { useTenant } from '@/contexts/TenantContext';
 import { readTenantScopedJson, tenantScopedStorageKey, writeTenantScopedJson } from '@/lib/tenant-storage';
 
@@ -88,6 +87,13 @@ const formatCountdown = (ms: number): string => {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 };
 
+const generateProductCode = (): string => {
+  const suffix = typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID().replace(/-/g, '').slice(0, 10)
+    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  return `P-${suffix}`.toUpperCase();
+};
+
 const InboundPage: React.FC = () => {
   const navigate = useNavigate();
   const { currentTenant } = useTenant();
@@ -101,10 +107,7 @@ const InboundPage: React.FC = () => {
     addInboundOrder, 
     checkCanUndo, 
     cancelInboundOrder,
-    getCachedCustomerProducts,
-    setCachedCustomerProducts,
     featureConfig,
-    refreshInventoryRecords,
   } = useData();
 
   // 防御性处理：确保数据是数组
@@ -120,6 +123,7 @@ const InboundPage: React.FC = () => {
   const [selectedProducts, setSelectedProducts] = useState<IProduct[]>([]);
   const [productSearch, setProductSearch] = useState('');
   const [productDialogOpen, setProductDialogOpen] = useState(false);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
   
   // 步骤3：入库单信息
   const [inboundDate, setInboundDate] = useState(new Date().toISOString().split('T')[0]);
@@ -142,6 +146,7 @@ const InboundPage: React.FC = () => {
   
   // 极简新建产品浮层
   const [quickCreateOpen, setQuickCreateOpen] = useState(false);
+  const [quickCreateSubmitting, setQuickCreateSubmitting] = useState(false);
   
   // 语音录入弹窗
   const [voiceInputOpen, setVoiceInputOpen] = useState(false);
@@ -384,92 +389,96 @@ const InboundPage: React.FC = () => {
   const handlePhotoUpload = async (detailId: string, files: FileList | null) => {
     if (!files?.length) return;
     const current = inboundDetails.find(detail => detail.id === detailId)?.attachments || [];
-    const selected = Array.from(files).slice(0, Math.max(0, 3 - current.length));
+    const remaining = Math.max(0, 3 - current.length);
+    if (!remaining) {
+      toast.error('单个产品最多上传3张图片，请先删除已有图片');
+      return;
+    }
+    const allFiles = Array.from(files);
+    const selected = allFiles.slice(0, remaining);
+    if (allFiles.length > remaining) toast.info(`最多还能上传${remaining}张，已只选择前${remaining}张`);
     const supportedImageTypes = new Set([
       'image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif',
-      'image/bmp', 'image/tiff', 'image/x-icon',
+      'image/bmp', 'image/tiff', 'image/x-icon', 'image/vnd.microsoft.icon',
     ]);
     if (selected.some(file => !supportedImageTypes.has(file.type.toLowerCase()) || file.size === 0 || file.size > 2 * 1024 * 1024)) {
       toast.error('仅支持 PNG/JPG/WebP/GIF/BMP/TIFF/ICO 图片，每张不超过2MB，单个产品最多3张');
       return;
     }
-    const encoded = await Promise.all(selected.map(file => new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(file);
-    })));
-    setInboundDetails(details => details.map(detail => detail.id === detailId
-      ? { ...detail, attachments: [...(detail.attachments || []), ...encoded].slice(0, 3) }
-      : detail));
+    try {
+      const encoded = await Promise.all(selected.map(file => new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error || new Error('读取图片失败'));
+        reader.readAsDataURL(file);
+      })));
+      setInboundDetails(details => details.map(detail => detail.id === detailId
+        ? { ...detail, attachments: [...(detail.attachments || []), ...encoded].slice(0, 3) }
+        : detail));
+    } catch {
+      toast.error('图片读取失败，请重新拍照或选择文件');
+    }
   };
 
-  const handleInboundListImport = async (file: File | undefined) => {
-    if (!file) return;
-    try {
-      let rows: Record<string, unknown>[] = [];
-      if (file.name.toLowerCase().endsWith('.txt') || file.type.startsWith('text/')) {
-        rows = (await file.text()).split(/\r?\n/).filter(Boolean).map(line => {
-          const [product, quantity, weight] = line.split(/[\t,，]/).map(value => value.trim());
-          return { 产品: product, 数量: quantity, 重量: weight };
+  const handleInboundListImport = (rows: ResolvedInboundImportRow[]) => {
+    const consolidatedCount = rows.length - new Set(rows.map(({ product }) => product.id)).size;
+    const masterDataAdjusted = rows.filter(({ source, product }) =>
+      (source.unit && source.unit !== product.unit)
+      || (source.unitPrice !== undefined && source.unitPrice !== product.unitPrice)
+      || (source.material && source.material !== product.material)
+      || (source.process && source.process !== product.process)).length;
+    setInboundDetails(current => {
+      const next = [...current];
+      rows.forEach(({ source, product }, index) => {
+        const quantity = source.quantity;
+        const weight = source.weight;
+        // 已建档产品以主数据为唯一计价依据，避免导入表中的旧价格造成前后端金额不一致。
+        const unit = product.unit || '件';
+        const unitPrice = product.unitPrice ?? 0;
+        const inboundType = source.inboundType || '正常';
+        const process = product.process;
+        const material = product.material;
+        const techRequirement = product.techRequirement;
+        // 后端规定一张入库单同一产品只能出现一次；导入重复行必须在提交前安全汇总。
+        const existingIndex = next.findIndex(detail => detail.productId === product.id);
+        if (existingIndex >= 0) {
+          const existing = next[existingIndex];
+          const mergedQuantity = existing.quantity + quantity;
+          const mergedWeight = existing.weight + weight;
+          next[existingIndex] = {
+            ...existing,
+            quantity: mergedQuantity,
+            weight: mergedWeight,
+            amount: unit === '件' ? mergedQuantity * unitPrice : mergedWeight * unitPrice,
+            urgent: existing.urgent || source.urgent,
+          };
+          return;
+        }
+        next.push({
+          id: `import-${Date.now()}-${index}`,
+          productId: product.id,
+          productName: product.name,
+          productModel: source.workpieceNo || product.workpieceNo || '',
+          productSpec: '',
+          unit,
+          unitPrice,
+          quantity,
+          weight,
+          amount: unit === '件' ? quantity * unitPrice : weight * unitPrice,
+          inboundType,
+          process,
+          material,
+          techRequirement,
+          urgent: source.urgent,
         });
-      } else {
-        const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
-      }
-      const pick = (row: Record<string, unknown>, aliases: string[]) => {
-        const key = Object.keys(row).find(item => aliases.some(alias => item.trim().toLowerCase() === alias.toLowerCase()));
-        return key ? row[key] : undefined;
-      };
-      let imported = 0;
-      const missing: string[] = [];
-      setInboundDetails(current => {
-        const next = [...current];
-        rows.forEach((row, index) => {
-          const productKey = String(pick(row, ['产品', '产品编码', '产品编号', '产品名称', 'product', 'code', 'name']) || '').trim();
-          if (!productKey) return;
-          const matched = products.find(product => product.code === productKey || product.name === productKey);
-          if (!matched || (selectedCustomer && matched.customerCode !== selectedCustomer.code)) {
-            missing.push(productKey);
-            return;
-          }
-          const quantity = Math.max(0, Math.trunc(Number(pick(row, ['数量', '入库数量', 'quantity']) || 0)));
-          const weight = Math.max(0, Number(pick(row, ['重量', '入库重量', 'weight', 'kg']) || 0));
-          const existingIndex = next.findIndex(detail => detail.productId === matched.id);
-          if (existingIndex >= 0) {
-            const existing = next[existingIndex];
-            const mergedQuantity = existing.quantity + quantity;
-            const mergedWeight = existing.weight + weight;
-            next[existingIndex] = {
-              ...existing,
-              quantity: mergedQuantity,
-              weight: mergedWeight,
-              amount: matched.unit === '件' ? mergedQuantity * matched.unitPrice : mergedWeight * matched.unitPrice,
-            };
-          } else {
-            next.push({
-              id: `import-${Date.now()}-${index}`,
-              productId: matched.id,
-              productName: matched.name,
-              productModel: matched.workpieceNo || '',
-              productSpec: '', unit: matched.unit || '件', unitPrice: matched.unitPrice,
-              quantity, weight,
-              amount: matched.unit === '件' ? quantity * matched.unitPrice : weight * matched.unitPrice,
-              inboundType: '正常', process: matched.process, material: matched.material,
-              techRequirement: matched.techRequirement, urgent: false,
-            });
-          }
-          imported += 1;
-        });
-        return next;
       });
-      if (missing.length) toast.warning(`未匹配产品，已跳过：${[...new Set(missing)].slice(0, 8).join('、')}`);
-      if (imported) toast.success(`已导入 ${imported} 行产品清单`);
-      else toast.error('清单中没有可导入的产品');
-    } catch (error) {
-      logger.error('导入入库清单失败', error);
-      toast.error('清单解析失败，请检查 Excel 或文本格式');
+      return next;
+    });
+    if (masterDataAdjusted > 0) {
+      toast.info(`${masterDataAdjusted} 行的单位、单价或工艺与产品档案不一致，已按最新产品档案计价`);
+    }
+    if (consolidatedCount > 0) {
+      toast.info(`${consolidatedCount} 个重复产品行已自动合并，数量和重量已累加`);
     }
   };
   
@@ -485,26 +494,39 @@ const InboundPage: React.FC = () => {
       return;
     }
     
-    // 查找是否已存在该产品
-    let product = products.find(p => 
-      p.customerCode === selectedCustomer.code && 
-      p.name === data.productName
-    );
-    
-    // 验证必填字段
-    if (!data.unit) {
+    const normalizedUnit = /^(kg|公斤|千克)$/i.test(data.unit?.trim() || '')
+      ? 'kg'
+      : /^(件|个|只|套|支|pcs?)$/i.test(data.unit?.trim() || '') ? '件' : '';
+    if (!normalizedUnit) {
       toast.error('语音中未识别到计价单位');
       return;
     }
-    if (data.unitPrice === undefined || data.unitPrice === null) {
+    const quantity = Number(data.quantity);
+    const weight = Number(data.weight || 0);
+    const parsedUnitPrice = Number(data.unitPrice);
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      toast.error('语音录入的数量必须为大于0的整数');
+      return;
+    }
+    if (!Number.isFinite(weight) || weight < 0 || (normalizedUnit === 'kg' && weight <= 0)) {
+      toast.error(normalizedUnit === 'kg' ? '按重量计价时必须识别或填写重量' : '语音录入的重量无效');
+      return;
+    }
+    if (data.unitPrice === undefined || data.unitPrice === null || !Number.isFinite(parsedUnitPrice) || parsedUnitPrice < 0) {
       toast.error('语音中未识别到单价');
       return;
     }
+
+    // 同一客户内按名称匹配；已有产品的单位和单价以产品主数据为准，避免页面金额与保存结果不一致。
+    let product = products.find(p =>
+      p.customerCode === selectedCustomer.code
+      && p.name.trim().toLowerCase() === data.productName!.trim().toLowerCase()
+    );
     
     // 如果不存在，自动创建新产品
     if (!product) {
       try {
-        const code = `P${Date.now().toString().slice(-6)}`;
+        const code = generateProductCode();
         product = await addProduct({
           code,
           name: data.productName,
@@ -512,8 +534,8 @@ const InboundPage: React.FC = () => {
           process: data.process || '',
           techRequirement: '',
           workpieceNo: '',
-          unit: data.unit,
-          unitPrice: data.unitPrice,
+          unit: normalizedUnit,
+          unitPrice: parsedUnitPrice,
           customerCode: selectedCustomer.code,
           customerName: selectedCustomer.name,
           status: 'incomplete',
@@ -526,16 +548,22 @@ const InboundPage: React.FC = () => {
     }
     
     // 添加入库明细
+    const unit = product.unit || normalizedUnit;
+    const unitPrice = product.unitPrice ?? parsedUnitPrice;
+    if (unit === 'kg' && weight <= 0) {
+      toast.error(`${product.name} 按重量计价，必须填写重量`);
+      return;
+    }
     const newDetail: IInboundDetail = {
       id: Date.now().toString(),
       productId: product.id,
       productName: product.name,
       productModel: product.workpieceNo || '',
       productSpec: '',
-      unit: data.unit || product.unit || '件',
-      unitPrice: data.unitPrice ?? product.unitPrice ?? 0,
-      quantity: data.quantity || 0,
-      weight: data.weight || 0,
+      unit,
+      unitPrice,
+      quantity,
+      weight,
       amount: 0,
       inboundType: '正常',
       process: data.process || product.process,
@@ -551,7 +579,22 @@ const InboundPage: React.FC = () => {
       newDetail.amount = newDetail.weight * newDetail.unitPrice;
     }
     
-    setInboundDetails(prev => [...prev, newDetail]);
+    setInboundDetails(prev => {
+      const existing = prev.find(detail => detail.productId === product!.id);
+      if (!existing) return [...prev, newDetail];
+      const mergedQuantity = existing.quantity + newDetail.quantity;
+      const mergedWeight = existing.weight + newDetail.weight;
+      toast.info(`${product!.name} 已在入库单中，本次语音数量和重量已自动累加`);
+      return prev.map(detail => detail.id === existing.id ? {
+        ...detail,
+        quantity: mergedQuantity,
+        weight: mergedWeight,
+        amount: detail.unit === '件'
+          ? mergedQuantity * detail.unitPrice
+          : mergedWeight * detail.unitPrice,
+        urgent: detail.urgent || newDetail.urgent,
+      } : detail);
+    });
     setVoiceInputOpen(false);
     // 语音录入成功，通过界面更新反馈
   };
@@ -569,15 +612,16 @@ const InboundPage: React.FC = () => {
     }
     
     // 查找是否已存在该产品
-    let product = products.find(p => 
-      p.customerCode === selectedCustomer.code && 
-      p.name === data.产品名称
+    let product = products.find(p =>
+      p.customerCode === selectedCustomer.code
+      && p.name.trim().toLowerCase() === data.产品名称!.trim().toLowerCase()
     );
+    const recognizedUnit = /^(kg|公斤|千克)$/i.test(data.单位?.trim() || '') ? 'kg' : '件';
     
     // 如果不存在，自动创建新产品
     if (!product) {
       try {
-        const code = `P${Date.now().toString().slice(-6)}`;
+        const code = generateProductCode();
         product = await addProduct({
           code,
           name: data.产品名称,
@@ -585,7 +629,7 @@ const InboundPage: React.FC = () => {
           process: data.工艺 || '',
           techRequirement: data.技术要求 || '',
           workpieceNo: data.工件编号 || '',
-          unit: data.单位 || '件',
+          unit: recognizedUnit,
           unitPrice: 0, // AI识别不返回价格，需要后续补充
           customerCode: selectedCustomer.code,
           customerName: selectedCustomer.name,
@@ -605,7 +649,7 @@ const InboundPage: React.FC = () => {
       productName: product.name,
       productModel: product.workpieceNo || '',
       productSpec: '',
-      unit: data.单位 || product.unit || '件',
+      unit: product.unit || recognizedUnit,
       unitPrice: product.unitPrice || 0,
       quantity: 0, // AI识别不返回数量，需要手动输入
       weight: 0,
@@ -615,9 +659,21 @@ const InboundPage: React.FC = () => {
       material: data.材质 || product.material,
       techRequirement: data.技术要求 || product.techRequirement,
       urgent: false,
+      attachments: data.imageDataUrl ? [data.imageDataUrl] : [],
     };
     
-    setInboundDetails(prev => [...prev, newDetail]);
+    setInboundDetails(prev => {
+      const existing = prev.find(detail => detail.productId === product!.id);
+      if (!existing) return [...prev, newDetail];
+      toast.info(`${product!.name} 已在入库单中，识别图片和补充信息已合并到原明细`);
+      return prev.map(detail => detail.id === existing.id ? {
+        ...detail,
+        process: detail.process || newDetail.process,
+        material: detail.material || newDetail.material,
+        techRequirement: detail.techRequirement || newDetail.techRequirement,
+        attachments: [...(detail.attachments || []), ...(newDetail.attachments || [])].slice(0, 3),
+      } : detail);
+    });
     setAiRecognitionOpen(false);
     // AI识别成功，通过界面更新反馈
   };
@@ -649,9 +705,8 @@ const InboundPage: React.FC = () => {
       return;
     }
     
-    // 生成产品编号
-    const code = `P${Date.now().toString().slice(-6)}`;
-    
+    const code = generateProductCode();
+    setQuickCreateSubmitting(true);
     try {
       const newProduct = await addProduct({
         code,
@@ -676,17 +731,19 @@ const InboundPage: React.FC = () => {
       toast.success('产品创建成功并已添加到入库单');
     } catch (error: any) {
       toast.error(error.message || '创建产品失败');
+    } finally {
+      setQuickCreateSubmitting(false);
     }
   };
   
   // 确认创建（忽略相似产品警告）
-  const confirmCreateProduct = () => {
+  const confirmCreateProduct = async () => {
     setShowSimilarWarning(false);
-    // 直接创建
-    const code = `P${Date.now().toString().slice(-6)}`;
-    if (selectedCustomer) {
-      addProduct({
-        code,
+    if (!selectedCustomer || quickCreateSubmitting) return;
+    setQuickCreateSubmitting(true);
+    try {
+      const newProduct = await addProduct({
+        code: generateProductCode(),
         name: quickCreateForm.name.trim(),
         material: quickCreateForm.material.trim(),
         process: quickCreateForm.process.trim(),
@@ -697,12 +754,15 @@ const InboundPage: React.FC = () => {
         customerCode: selectedCustomer.code,
         customerName: selectedCustomer.name,
         status: 'incomplete',
-      } as Omit<IProduct, 'id' | 'stock' | 'inboundQuantity' | 'inboundWeight' | 'inboundDate' | 'batchNo'>).then(newProduct => {
-        handleAddProduct(newProduct);
-        setQuickCreateForm({ name: '', material: '', process: '', unit: '件', unitPrice: '' });
-        setQuickCreateOpen(false);
-        toast.success('产品创建成功并已添加到入库单');
-      });
+      } as Omit<IProduct, 'id' | 'stock' | 'inboundQuantity' | 'inboundWeight' | 'inboundDate' | 'batchNo'>);
+      handleAddProduct(newProduct);
+      setQuickCreateForm({ name: '', material: '', process: '', unit: '件', unitPrice: '' });
+      setQuickCreateOpen(false);
+      toast.success('产品创建成功并已添加到入库单');
+    } catch (error: any) {
+      toast.error(error.message || '创建产品失败，请检查网络后重试');
+    } finally {
+      setQuickCreateSubmitting(false);
     }
   };
   
@@ -738,20 +798,48 @@ const InboundPage: React.FC = () => {
   const saveLockRef = useRef(false);
 
   const handleSaveAndPrint = async () => {
+    if (!selectedCustomer) {
+      toast.error('请先选择客户');
+      return;
+    }
     if (inboundDetails.length === 0) {
       toast.error('请至少添加一个产品');
       return;
     }
+    if (inboundDetails.length > 500) {
+      toast.error(`当前有 ${inboundDetails.length} 个产品，单张入库单最多500个，请拆分后提交`);
+      return;
+    }
+    if (!inboundDate || Number.isNaN(Date.parse(inboundDate))) {
+      toast.error('请选择有效的入库日期');
+      return;
+    }
+    if (!creator.trim()) {
+      toast.error('请填写制单人');
+      return;
+    }
     // 数量是批次追踪和库存件数的基础；按 kg 计价时还必须填写重量。
     for (const detail of inboundDetails) {
-      if (detail.quantity <= 0) {
-        toast.error(`${detail.productName}：必须填写大于0的入库数量`);
+      if (!Number.isInteger(detail.quantity) || detail.quantity <= 0) {
+        toast.error(`${detail.productName}：入库数量必须为大于0的整数`);
+        return;
+      }
+      if (!Number.isFinite(detail.weight) || detail.weight < 0) {
+        toast.error(`${detail.productName}：入库重量不能为负数`);
         return;
       }
       if (detail.unit === 'kg' && detail.weight <= 0) {
         toast.error(`${detail.productName}：计价单位为"kg"，必须填写入库重量`);
         return;
       }
+    }
+
+    // 服务器请求体上限为20MB，给单据字段和编码开销预留空间，避免用户等待后才收到413。
+    const attachmentPayloadBytes = inboundDetails.reduce((total, detail) => total
+      + (detail.attachments || []).reduce((sum, image) => sum + new Blob([image]).size, 0), 0);
+    if (attachmentPayloadBytes > 17 * 1024 * 1024) {
+      toast.error('本单图片总数据过大，请压缩或删除部分图片后再保存（建议总量不超过17MB）');
+      return;
     }
 
     if (!navigator.onLine) {
@@ -764,8 +852,7 @@ const InboundPage: React.FC = () => {
     setIsSaving(true);
 
     // 创建入库单记录（单号由后端生成）
-    if (selectedCustomer) {
-      try {
+    try {
       const newOrder = await addInboundOrder({
         customerId: selectedCustomer.id,
         customerName: selectedCustomer.name,
@@ -806,13 +893,9 @@ const InboundPage: React.FC = () => {
       writeTenantScopedJson('operation_defaults', currentTenant?.orgCode, { creator, transporter, plateNumber, driver });
       toast.success(`入库单 ${newOrder.inboundNo} 保存成功，库存已更新；飞书将自动同步`);
       setPrintDialogOpen(true);
-      } catch (error) {
-        toast.error('保存失败：' + (error instanceof Error ? error.message : '未知错误'));
-      } finally {
-        saveLockRef.current = false;
-        setIsSaving(false);
-      }
-    } else {
+    } catch (error) {
+      toast.error('保存失败：' + (error instanceof Error ? error.message : '未知错误'));
+    } finally {
       saveLockRef.current = false;
       setIsSaving(false);
     }
@@ -825,6 +908,21 @@ const InboundPage: React.FC = () => {
     clearDraft();
     handleBackToCustomer();
     toast.success('入库流程完成');
+  };
+
+  const handleContinueOutbound = () => {
+    if (!selectedCustomer) return;
+    setPrintDialogOpen(false);
+    clearDraft();
+    navigate('/outbound', {
+      state: {
+        fromInbound: true,
+        customerId: selectedCustomer.id,
+        customerCode: selectedCustomer.code,
+        customerName: selectedCustomer.name,
+        inboundNo: currentInboundNo,
+      },
+    });
   };
 
   // 返回客户选择
@@ -1106,6 +1204,10 @@ const InboundPage: React.FC = () => {
               <td style={{ border: '1px solid #666', padding: '5px', backgroundColor: 'var(--print-header-bg, #f5f5f5)', fontWeight: 'bold', textAlign: 'center', width: '70px' }}>入库日期</td>
               <td style={{ border: '1px solid #666', padding: '5px', width: '80px' }}>{inboundDate || ''}</td>
             </tr>
+            <tr>
+              <td style={{ border: '1px solid #666', padding: '5px', backgroundColor: 'var(--print-header-bg, #f5f5f5)', fontWeight: 'bold', textAlign: 'center' }}>入库单号</td>
+              <td style={{ border: '1px solid #666', padding: '5px' }} colSpan={3}>{currentInboundNo || ''}</td>
+            </tr>
           </tbody>
         </table>
 
@@ -1152,7 +1254,7 @@ const InboundPage: React.FC = () => {
             </tr>
           </thead>
           <tbody>
-            {inboundDetails.slice(0, 8).map((detail, index) => (
+            {inboundDetails.map((detail, index) => (
               <tr key={detail.id}>
                 {visibleFields.map(field => (
                   <td 
@@ -1168,14 +1270,6 @@ const InboundPage: React.FC = () => {
                 ))}
               </tr>
             ))}
-            {inboundDetails.length > 8 && (
-              <tr>
-                <td style={{ border: '1px solid #666', padding: '4px', textAlign: 'center' }}>...</td>
-                <td style={{ border: '1px solid #666', padding: '4px', textAlign: 'center' }} colSpan={visibleFields.length - 1}>
-                  共 {inboundDetails.length} 条记录
-                </td>
-              </tr>
-            )}
           </tbody>
           {/* 合计行 */}
           <tfoot>
@@ -1454,11 +1548,10 @@ const InboundPage: React.FC = () => {
                   <Plus className="w-4 h-4" />
                   添加产品
                 </Button>
-                <label className="inline-flex h-10 items-center gap-2 rounded-md border bg-background px-4 text-sm font-medium cursor-pointer hover:bg-muted">
+                <Button variant="outline" onClick={() => setImportDialogOpen(true)} className="gap-2">
                   <Download className="w-4 h-4" />
-                  导入清单
-                  <input type="file" accept=".xlsx,.xls,.csv,.txt,text/plain" className="hidden" onChange={(event) => { void handleInboundListImport(event.target.files?.[0]); event.currentTarget.value = ''; }} />
-                </label>
+                  智能导入清单
+                </Button>
                 <Button
                   variant="outline"
                   onClick={() => setVoiceInputOpen(true)}
@@ -1761,9 +1854,9 @@ const InboundPage: React.FC = () => {
                     </div>
                   )}
                   <div className="flex justify-end">
-                    <Button size="sm" onClick={handleQuickCreateProduct} className="bg-primary">
+                    <Button size="sm" onClick={handleQuickCreateProduct} className="bg-primary" disabled={quickCreateSubmitting}>
                       <Plus className="w-4 h-4 mr-1" />
-                      创建并添加
+                      {quickCreateSubmitting ? '创建中...' : '创建并添加'}
                     </Button>
                   </div>
                 </div>
@@ -1787,6 +1880,18 @@ const InboundPage: React.FC = () => {
           </div>
         </SheetContent>
       </Sheet>
+
+      {selectedCustomer && (
+        <InboundListImportDialog
+          open={importDialogOpen}
+          onOpenChange={setImportDialogOpen}
+          customerCode={selectedCustomer.code}
+          customerName={selectedCustomer.name}
+          products={products}
+          addProduct={addProduct}
+          onApply={handleInboundListImport}
+        />
+      )}
 
       {/* 打印预览 - 改为 Sheet 抽屉 */}
       <Sheet open={printDialogOpen} onOpenChange={setPrintDialogOpen}>
@@ -1859,7 +1964,7 @@ const InboundPage: React.FC = () => {
           </div>
           
           <PrintPreview />
-          <div className="flex justify-end gap-2 mt-6 pt-4 border-t no-print">
+          <div className="flex flex-wrap justify-end gap-2 mt-6 pt-4 border-t no-print">
             <Button
               variant="outline"
               onClick={handleClosePrintDialog}
@@ -1901,14 +2006,22 @@ const InboundPage: React.FC = () => {
               <Download className="w-4 h-4 mr-2" />
               导出Excel
             </Button>
-            <Button onClick={() => {
-              // 延迟打印，确保Dialog内容完全渲染
-              setTimeout(() => {
-                smartPrint('print-preview-content', '热处理流程卡').catch(() => undefined);
-              }, 500);
-            }}>
+            <Button
+              variant="outline"
+              onClick={() => void exportElementToPdf('print-preview-content', `${currentInboundNo || '入库流程卡'}.pdf`)
+                .then(() => toast.success('PDF已导出'))
+                .catch(error => toast.error(error instanceof Error ? error.message : 'PDF导出失败'))}
+            >
+              <Download className="w-4 h-4 mr-2" />
+              导出PDF
+            </Button>
+            <Button onClick={() => void smartPrint('print-preview-content', '热处理流程卡').catch(() => undefined)}>
               <Printer className="w-4 h-4 mr-2" />
               打印标识卡
+            </Button>
+            <Button className="bg-accent text-accent-foreground hover:bg-accent/90" onClick={handleContinueOutbound}>
+              <ChevronRight className="w-4 h-4 mr-2" />
+              继续为该客户发货
             </Button>
           </div>
         </SheetContent>
@@ -1942,7 +2055,7 @@ const InboundPage: React.FC = () => {
                 className={quantityWarning?.severity === 'error' ? 'bg-red-600 hover:bg-red-700' : 'bg-amber-600 hover:bg-amber-700'}
                 onClick={() => setQuantityWarning(null)}
               >
-                {quantityWarning?.severity === 'error' ? '已仔细核对，确认保存' : '确认无误，继续保存'}
+                {quantityWarning?.severity === 'error' ? '已仔细核对，确认数量' : '确认数量无误'}
               </Button>
             </div>
           </div>
@@ -1991,9 +2104,10 @@ const InboundPage: React.FC = () => {
               </Button>
               <Button 
                 className="bg-primary"
-                onClick={confirmCreateProduct}
+                onClick={() => void confirmCreateProduct()}
+                disabled={quickCreateSubmitting}
               >
-                确认创建新产品
+                {quickCreateSubmitting ? '创建中...' : '确认创建新产品'}
               </Button>
             </div>
           </div>

@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Body, Query, Param, Req, Logger } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Post, Put, Body, Query, Param, Req, Logger } from '@nestjs/common';
 import type { InventoryChangeType } from '@shared/api.interface';
 import { CanRole, NeedLogin } from '@lark-apaas/fullstack-nestjs-core';
 import type { Request } from 'express';
@@ -22,6 +22,13 @@ export class InventoryController {
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
+    let parsedMinStock: number | undefined;
+    if (minStock !== undefined) {
+      parsedMinStock = Number(minStock);
+      if (!Number.isInteger(parsedMinStock) || parsedMinStock < 0) {
+        throw new BadRequestException('minStock 必须为非负整数');
+      }
+    }
     const pagination = parsePagination(page, pageSize, {
       page: PAGINATION.DEFAULT_PAGE, pageSize: PAGINATION.DEFAULT_PAGE_SIZE, maxPageSize: PAGINATION.MAX_PAGE_SIZE,
     });
@@ -29,7 +36,7 @@ export class InventoryController {
       search,
       customerCode,
       material,
-      minStock: minStock ? parseInt(minStock, 10) : undefined,
+      minStock: parsedMinStock,
       ...pagination,
     });
   }
@@ -44,6 +51,15 @@ export class InventoryController {
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
+    const allowedChangeTypes = [
+      'inbound', 'outbound', 'outbound_rollback', 'inbound_rollback',
+      'adjustment_increase', 'adjustment_decrease', 'manual_increase', 'manual_decrease',
+      'inventory_profit', 'inventory_loss', 'damage', 'quality_reject',
+      'closed_balance', 'return', 'scrap', 'rework',
+    ];
+    if (changeType && !allowedChangeTypes.includes(changeType)) {
+      throw new BadRequestException('无效的库存变动类型');
+    }
     const pagination = parsePagination(page, pageSize, {
       page: PAGINATION.DEFAULT_PAGE, pageSize: PAGINATION.DEFAULT_PAGE_SIZE, maxPageSize: PAGINATION.MAX_PAGE_SIZE,
     });
@@ -118,9 +134,9 @@ export class InventoryController {
     });
   }
 
-  // 增加库存（入库专用）
+  // 兼容旧客户端的管理员库存修正入口；正常入库必须通过 /api/inbound 创建完整单据和批次。
   @NeedLogin()
-  @CanRole('inbound:create')
+  @CanRole('inventory:adjust')
   @Post('increase')
   async increaseStock(
     @Body()
@@ -140,9 +156,9 @@ export class InventoryController {
     });
   }
 
-  // 减少库存（出库专用）
+  // 兼容旧客户端的管理员库存修正入口；正常出库必须通过 /api/outbound 保留批次和对账链路。
   @NeedLogin()
-  @CanRole('outbound:create')
+  @CanRole('inventory:adjust')
   @Post('decrease')
   async decreaseStock(
     @Body()

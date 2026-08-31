@@ -37,6 +37,7 @@ export interface AIRecognitionResult {
   工件编号?: string;
   单位?: string;
   技术要求?: string;
+  imageDataUrl?: string;
 }
 
 // 字段置信度类型
@@ -63,6 +64,7 @@ export const AIRecognitionDialog: React.FC<AIRecognitionDialogProps> = ({
   const [result, setResult] = useState<AIRecognitionResult | null>(null);
   const [fieldConfidences, setFieldConfidences] = useState<FieldConfidence[]>([]);
   const [editedResult, setEditedResult] = useState<AIRecognitionResult>({});
+  const [attachmentDataUrl, setAttachmentDataUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
 
@@ -74,6 +76,7 @@ export const AIRecognitionDialog: React.FC<AIRecognitionDialogProps> = ({
     setResult(null);
     setFieldConfidences([]);
     setEditedResult({});
+    setAttachmentDataUrl('');
   }, []);
 
   // 处理关闭
@@ -136,10 +139,18 @@ export const AIRecognitionDialog: React.FC<AIRecognitionDialogProps> = ({
       toast.success('识别完成，请核对结果');
     } catch (error) {
       logger.error({ level: 'error', args: [`AI识别失败: ${error instanceof Error ? error.message : '未知错误'}`] });
-      toast.error('识别失败，请重试或手动输入');
+      throw error;
     } finally {
       setIsRecognizing(false);
     }
+  }, []);
+
+  const enableManualFallback = useCallback(() => {
+    const fields: FieldConfidence[] = (['产品名称', '材质', '工艺', '工件编号', '单位', '技术要求'] as const)
+      .map(field => ({ field, value: '', confidence: 'low' }));
+    setFieldConfidences(fields);
+    setResult({});
+    setEditedResult({});
   }, []);
 
   // 计算置信度（基于字段值的存在性和长度）
@@ -156,8 +167,9 @@ export const AIRecognitionDialog: React.FC<AIRecognitionDialogProps> = ({
   // 处理文件选择
   const handleFileSelect = useCallback(async (file: File) => {
     // 验证文件类型
-    if (!file.type.startsWith('image/')) {
-      toast.error('请选择图片文件');
+    const allowedTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp', 'image/tiff', 'image/x-icon', 'image/vnd.microsoft.icon'];
+    if (!allowedTypes.includes(file.type.toLowerCase())) {
+      toast.error('仅支持 PNG/JPG/WebP/GIF/BMP/TIFF/ICO 图片');
       return;
     }
     // 验证文件大小（最大10MB）
@@ -166,21 +178,46 @@ export const AIRecognitionDialog: React.FC<AIRecognitionDialogProps> = ({
       return;
     }
 
+    if (file.size <= 0) {
+      toast.error('图片文件为空');
+      return;
+    }
+
+    const localDataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error || new Error('读取图片失败'));
+      reader.readAsDataURL(file);
+    }).catch(() => '');
+    if (!localDataUrl) {
+      toast.error('图片读取失败，请重新选择');
+      return;
+    }
+    setImageUrl(localDataUrl);
+    if (file.size <= 2 * 1024 * 1024) {
+      setAttachmentDataUrl(localDataUrl);
+    } else {
+      setAttachmentDataUrl('');
+      toast.info('图片可用于识别，但超过2MB，不会附加到入库单');
+    }
+
     try {
       const url = await uploadImage(file);
       setImageUrl(url);
       await performRecognition(url);
     } catch (error) {
-      toast.error('图片处理失败，请重试');
+      enableManualFallback();
+      toast.error('自动识别暂不可用，图片已保留，可手动填写后继续');
     }
-  }, [uploadImage, performRecognition]);
+  }, [enableManualFallback, uploadImage, performRecognition]);
 
   // 处理input文件选择
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      handleFileSelect(file);
+      void handleFileSelect(file);
     }
+    e.currentTarget.value = '';
   }, [handleFileSelect]);
 
   // 处理拖拽
@@ -222,7 +259,7 @@ export const AIRecognitionDialog: React.FC<AIRecognitionDialogProps> = ({
       if (items[i].type.startsWith('image/')) {
         const file = items[i].getAsFile();
         if (file) {
-          handleFileSelect(file);
+          void handleFileSelect(file);
           break;
         }
       }
@@ -232,15 +269,30 @@ export const AIRecognitionDialog: React.FC<AIRecognitionDialogProps> = ({
   // 重新识别
   const handleRetry = useCallback(() => {
     if (imageUrl) {
-      performRecognition(imageUrl);
+      void performRecognition(imageUrl).catch(() => {
+        enableManualFallback();
+        toast.error('重新识别失败，请手动核对并填写');
+      });
     }
-  }, [imageUrl, performRecognition]);
+  }, [enableManualFallback, imageUrl, performRecognition]);
 
   // 确认填充
   const handleConfirm = useCallback(() => {
-    onConfirm(editedResult);
+    if (!editedResult.产品名称?.trim()) {
+      toast.error('请填写产品名称');
+      return;
+    }
+    const unit = editedResult.单位?.trim();
+    const normalizedUnit = !unit ? undefined
+      : /^(kg|公斤|千克)$/i.test(unit) ? 'kg'
+        : /^(件|个|只|套|支|pcs?)$/i.test(unit) ? '件' : '';
+    if (unit && !normalizedUnit) {
+      toast.error('计价单位只能为“件”或“kg”');
+      return;
+    }
+    onConfirm({ ...editedResult, 产品名称: editedResult.产品名称.trim(), 单位: normalizedUnit, imageDataUrl: attachmentDataUrl || undefined });
     handleClose();
-  }, [editedResult, onConfirm, handleClose]);
+  }, [attachmentDataUrl, editedResult, onConfirm, handleClose]);
 
   // 获取置信度图标
   const getConfidenceIcon = (confidence: 'high' | 'medium' | 'low') => {

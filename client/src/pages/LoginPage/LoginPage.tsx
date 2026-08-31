@@ -13,10 +13,39 @@ const LoginPage: React.FC = () => {
   const navigate = useNavigate();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [name, setName] = useState('');
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+
+  const persistLoginSession = (token: string, user: any) => {
+    if (!token || !user?.id) throw new Error('服务器未返回有效的登录凭证');
+    const roleMap: Record<string, { id: string; name: string }> = {
+      admin: { id: '1', name: '系统管理员' },
+      operator: { id: '2', name: '操作员' },
+      finance: { id: '4', name: '财务人员' },
+      viewer: { id: '5', name: '只读成员' },
+    };
+    const mappedRole = roleMap[user.role] || roleMap.viewer;
+    localStorage.setItem('authToken', token);
+    localStorage.removeItem('currentOrgId');
+    localStorage.removeItem('currentOrgCode');
+    localStorage.removeItem('currentOrgName');
+    setCurrentUser({
+      id: user.id,
+      username: user.username,
+      name: user.name,
+      roleId: mappedRole.id,
+      roleName: mappedRole.name,
+      accountRoleId: mappedRole.id,
+      accountRoleName: mappedRole.name,
+      department: user.department || '',
+      status: 'active' as const,
+      lastLogin: user.lastLogin || new Date().toLocaleString('zh-CN'),
+      deviceLimit: user.deviceLimit || 1,
+    });
+  };
 
   // 检查是否已登录
   useEffect(() => {
@@ -47,35 +76,9 @@ const LoginPage: React.FC = () => {
         deviceName: navigator.userAgent,
       });
       const { token, user } = response.data;
-      if (!token || !user?.id) throw new Error('登录响应无效');
-      const roleMap: Record<string, { id: string; name: string }> = {
-        admin: { id: '1', name: '系统管理员' },
-        operator: { id: '2', name: '操作员' },
-        finance: { id: '4', name: '财务人员' },
-        viewer: { id: '5', name: '只读成员' },
-      };
-      const mappedRole = roleMap[user.role] || roleMap.viewer;
-      localStorage.setItem('authToken', token);
-        const userInfo = {
-          id: user.id,
-          username: user.username,
-          name: user.name,
-          roleId: mappedRole.id,
-          roleName: mappedRole.name,
-          accountRoleId: mappedRole.id,
-          accountRoleName: mappedRole.name,
-          department: user.department || '',
-          status: 'active' as const,
-          lastLogin: user.lastLogin || new Date().toLocaleString('zh-CN'),
-          deviceLimit: user.deviceLimit || 1,
-      };
-        // 租户选择属于登录会话，不能沿用上一位用户的组织缓存。
-        localStorage.removeItem('currentOrgId');
-        localStorage.removeItem('currentOrgCode');
-        localStorage.removeItem('currentOrgName');
-        setCurrentUser(userInfo);
-        toast.success(`欢迎回来，${user.name}！`);
-        navigate('/organizations');
+      persistLoginSession(token, user);
+      toast.success(`欢迎回来，${user.name}！`);
+      navigate('/organizations');
     } catch (error: any) {
       localStorage.removeItem('authToken');
       localStorage.removeItem('heat_treatment_current_user');
@@ -87,17 +90,45 @@ const LoginPage: React.FC = () => {
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !username.trim() || password.length < 8) {
-      toast.error('请填写姓名、3-50位用户名和至少8位密码');
+    const normalizedUsername = username.trim();
+    if (!name.trim()) {
+      toast.error('请输入姓名');
+      return;
+    }
+    if (!/^[A-Za-z0-9_.-]{3,50}$/.test(normalizedUsername)) {
+      toast.error('用户名需为3-50位字母、数字、点、横线或下划线');
+      return;
+    }
+    if (password.length < 8 || password.length > 128) {
+      toast.error('密码长度需为8-128位');
+      return;
+    }
+    if (password !== confirmPassword) {
+      toast.error('两次输入的密码不一致');
       return;
     }
     setIsLoading(true);
     try {
-      await axiosForBackend.post('/api/auth/register', { name: name.trim(), username: username.trim(), password });
-      toast.success('注册成功，请登录后创建组织或使用邀请码加入');
-      setPassword('');
-      setMode('login');
+      let response = await axiosForBackend.post('/api/auth/register', {
+        name: name.trim(),
+        username: normalizedUsername,
+        password,
+        deviceName: navigator.userAgent,
+      });
+      // 兼容滚动部署期间仍返回“用户信息”的旧服务版本。
+      if (!response.data?.token) {
+        response = await axiosForBackend.post('/api/auth/login', {
+          username: normalizedUsername,
+          password,
+          deviceName: navigator.userAgent,
+        });
+      }
+      persistLoginSession(response.data.token, response.data.user);
+      toast.success('账号创建成功，请创建组织或使用邀请码加入组织');
+      navigate('/organizations', { replace: true });
     } catch (error: any) {
+      localStorage.removeItem('authToken');
+      localStorage.removeItem('heat_treatment_current_user');
       toast.error(error?.response?.data?.error?.message || error?.response?.data?.message || error.message || '注册失败');
     } finally {
       setIsLoading(false);
@@ -136,7 +167,7 @@ const LoginPage: React.FC = () => {
                 </Label>
                 <Input
                   id="username"
-                  placeholder="请输入用户名"
+                  placeholder={mode === 'register' ? '3-50位字母、数字、点、横线或下划线' : '请输入用户名'}
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   disabled={isLoading}
@@ -169,6 +200,23 @@ const LoginPage: React.FC = () => {
                   </Button>
                 </div>
               </div>
+              {mode === 'register' && (
+                <div className="space-y-2">
+                  <Label htmlFor="confirm-password"><Lock className="w-4 h-4 inline mr-1" />确认密码</Label>
+                  <Input
+                    id="confirm-password"
+                    type={showPassword ? 'text' : 'password'}
+                    placeholder="请再次输入密码"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    disabled={isLoading}
+                    autoComplete="new-password"
+                    aria-invalid={Boolean(confirmPassword && password !== confirmPassword)}
+                  />
+                  {confirmPassword && password !== confirmPassword && <p className="text-xs text-error">两次输入的密码不一致</p>}
+                  {confirmPassword && password === confirmPassword && <p className="text-xs text-success">密码一致</p>}
+                </div>
+              )}
               <Button type="submit" className="w-full" disabled={isLoading}>
                 {isLoading ? (
                   <>

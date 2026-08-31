@@ -33,9 +33,10 @@ export class InboundController {
     @Query('pageSize') pageSize?: string,
   ) {
     // 验证 status 参数
-    const validStatus = status && ['active', 'cancelled', 'all'].includes(status)
-      ? status as 'active' | 'cancelled' | 'all'
-      : 'all';
+    if (status && !['active', 'cancelled', 'all'].includes(status)) {
+      throw new BadRequestException('status 必须为 active、cancelled 或 all');
+    }
+    const validStatus = (status || 'all') as 'active' | 'cancelled' | 'all';
     
     const pagination = parsePagination(page, pageSize, {
       page: PAGINATION.DEFAULT_PAGE, pageSize: PAGINATION.DEFAULT_PAGE_SIZE, maxPageSize: PAGINATION.MAX_PAGE_SIZE,

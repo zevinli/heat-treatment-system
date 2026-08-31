@@ -29,8 +29,14 @@ export class ReconciliationController {
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
+    const allowedStatuses = ['draft', 'confirmed', 'audited', 'invoiced', 'partial_paid', 'paid', 'cancelled', 'voided', 'all'];
+    if (status && !allowedStatuses.includes(status)) throw new BadRequestException('无效的对账单状态');
+    if (month && month !== 'all' && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      throw new BadRequestException('月份格式必须为 YYYY-MM');
+    }
     const pagination = parsePagination(page, pageSize, { page: 1, pageSize: 20, maxPageSize: 100 });
     return this.reconciliationService.findAll({
+      search,
       customerId,
       status,
       month,
@@ -103,8 +109,9 @@ export class ReconciliationController {
   async recordInvoice(
     @Param('id') id: string,
     @Body('amount') amount: number,
+    @Req() req: Request,
   ) {
-    return this.reconciliationService.addInvoice(id, amount);
+    return this.reconciliationService.addInvoice(id, amount, req.userContext.userId!);
   }
 
   @NeedLogin()
@@ -113,8 +120,9 @@ export class ReconciliationController {
   async recordReceipt(
     @Param('id') id: string,
     @Body('amount') amount: number,
+    @Req() req: Request,
   ) {
-    return this.reconciliationService.addReceipt(id, amount);
+    return this.reconciliationService.addReceipt(id, amount, req.userContext.userId!);
   }
 
   @NeedLogin()
@@ -122,11 +130,11 @@ export class ReconciliationController {
   @Put(':id/audit')
   async audit(
     @Param('id') id: string,
-    @Body('auditor') auditor: string,
     @Req() req: Request,
   ) {
     const { userId } = req.userContext;
-    return this.reconciliationService.audit(id, auditor || userId);
+    // 审核人必须来自已认证会话，不能接受请求体冒充他人。
+    return this.reconciliationService.audit(id, userId);
   }
 
   @NeedLogin()

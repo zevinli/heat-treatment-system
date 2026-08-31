@@ -1,4 +1,4 @@
-import { Controller, Get, Query, Post, Body } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Query, Post, Body } from '@nestjs/common';
 import { CanRole } from '@lark-apaas/fullstack-nestjs-core';
 import { parsePositiveInt } from '../../common/utils/pagination';
 import { StatisticsService } from './statistics.service';
@@ -81,6 +81,7 @@ export class StatisticsController {
   @CanRole('statistics:view')
   async generateStats(@Body() data: { date: string }) {
     const date = data.date ? new Date(data.date) : new Date();
+    if (Number.isNaN(date.getTime())) throw new BadRequestException('无效的统计日期');
     return this.statisticsService.generateDailyStats(date);
   }
 }

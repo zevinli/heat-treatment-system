@@ -1,10 +1,11 @@
-import React, { lazy, Suspense } from 'react';
+import React, { lazy, Suspense, useEffect, useState } from 'react';
 import { Route, Routes, Navigate, useLocation } from 'react-router-dom';
 import NotFound from './pages/NotFound/NotFound';
 import LandingPage from './pages/LandingPage/LandingPage';
 import { PermissionGuard } from './components/PermissionGuard';
-import { getCurrentUser } from './lib/auth-session';
+import { getCurrentUser, setCurrentUser } from './lib/auth-session';
 import { TenantProvider, needsTenantSelection } from './contexts/TenantContext';
+import { getMyProfile } from './api';
 
 const Layout = lazy(() => import('./components/Layout'));
 const LoginPage = lazy(() => import('./pages/LoginPage/LoginPage'));
@@ -44,13 +45,76 @@ const RouteFallback = () => (
   </div>
 );
 
-// 登录保护路由
-const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+type SessionValidationState = 'checking' | 'valid' | 'invalid';
+
+const clearCachedSession = () => {
+  setCurrentUser(null);
+  localStorage.removeItem('currentOrgId');
+  localStorage.removeItem('currentOrgCode');
+  localStorage.removeItem('currentOrgName');
+  window.dispatchEvent(new Event('heat-treatment:auth-invalidated'));
+};
+
+/**
+ * 本地缓存只负责减少重复输入，不能被当作有效登录凭证。路由首次挂载时向
+ * 服务端核验会话；网络暂时不可用时保留离线草稿入口，但 401/403 必须退出。
+ */
+const useValidatedSession = (): SessionValidationState => {
   const user = getCurrentUser();
   const authToken = localStorage.getItem('authToken');
+  const [state, setState] = useState<SessionValidationState>(
+    user && authToken ? 'checking' : 'invalid',
+  );
+
+  useEffect(() => {
+    let active = true;
+    const handleInvalidated = () => {
+      if (active) setState('invalid');
+    };
+    window.addEventListener('heat-treatment:auth-invalidated', handleInvalidated);
+
+    if (!user || !authToken) {
+      setState('invalid');
+      return () => {
+        active = false;
+        window.removeEventListener('heat-treatment:auth-invalidated', handleInvalidated);
+      };
+    }
+
+    setState('checking');
+    void getMyProfile()
+      .then(() => {
+        if (active) setState('valid');
+      })
+      .catch((error: any) => {
+        if (!active) return;
+        const status = error?.response?.status;
+        if (status === 401 || status === 403) {
+          clearCachedSession();
+          setState('invalid');
+          return;
+        }
+        // 服务不可达时允许进入已有会话，以便用户查看本组织离线草稿。
+        setState('valid');
+      });
+
+    return () => {
+      active = false;
+      window.removeEventListener('heat-treatment:auth-invalidated', handleInvalidated);
+    };
+  }, [authToken, user?.id]);
+
+  return state;
+};
+
+// 登录保护路由
+const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const sessionState = useValidatedSession();
   const location = useLocation();
 
-  if (!user || !authToken) {
+  if (sessionState === 'checking') return <RouteFallback />;
+
+  if (sessionState === 'invalid') {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
@@ -63,10 +127,11 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 
 // 已登录用户跳转
 const PublicRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const user = getCurrentUser();
-  const authToken = localStorage.getItem('authToken');
+  const sessionState = useValidatedSession();
 
-  if (user && authToken) {
+  if (sessionState === 'checking') return <RouteFallback />;
+
+  if (sessionState === 'valid') {
     return <Navigate to="/dashboard" replace />;
   }
 

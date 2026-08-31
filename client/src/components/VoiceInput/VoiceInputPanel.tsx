@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { VoiceInputButton } from './VoiceInputButton';
 import { parseVoiceInput, VoiceParseResult } from '@/api';
@@ -21,8 +22,13 @@ export const VoiceInputPanel: React.FC<VoiceInputPanelProps> = ({
   const [isParsing, setIsParsing] = useState(false);
   const [parseResult, setParseResult] = useState<VoiceParseResult | null>(null);
   const [editedData, setEditedData] = useState<NonNullable<VoiceParseResult['data']>>({});
+  const [manualText, setManualText] = useState('');
 
   const handleVoiceResult = useCallback(async (text: string) => {
+    if (!text.trim()) {
+      toast.error('请输入或说出产品信息');
+      return;
+    }
     setIsParsing(true);
     try {
       const result = await parseVoiceInput(text, 'inbound');
@@ -52,16 +58,30 @@ export const VoiceInputPanel: React.FC<VoiceInputPanelProps> = ({
       toast.error('产品名称不能为空');
       return;
     }
-    if (!editedData.unit || !editedData.unit.trim()) {
-      toast.error('计价单位不能为空');
+    const normalizedUnit = /^(kg|公斤|千克)$/i.test(editedData.unit?.trim() || '')
+      ? 'kg'
+      : /^(件|个|只|套|支|pcs?)$/i.test(editedData.unit?.trim() || '') ? '件' : '';
+    if (!normalizedUnit) {
+      toast.error('计价单位只能为“件”或“kg”（个、只、套、支会按件处理）');
       return;
     }
-    if (editedData.unitPrice === undefined || editedData.unitPrice === null) {
-      toast.error('单价不能为空');
+    const quantity = Number(editedData.quantity);
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      toast.error('数量必须为大于0的整数');
+      return;
+    }
+    const weight = Number(editedData.weight || 0);
+    if (!Number.isFinite(weight) || weight < 0 || (normalizedUnit === 'kg' && weight <= 0)) {
+      toast.error(normalizedUnit === 'kg' ? '按重量计价时必须填写大于0的重量' : '重量不能为负数');
+      return;
+    }
+    const unitPrice = Number(editedData.unitPrice);
+    if (editedData.unitPrice === undefined || editedData.unitPrice === null || !Number.isFinite(unitPrice) || unitPrice < 0) {
+      toast.error('单价必须为大于或等于0的数字');
       return;
     }
     
-    onApply(editedData);
+    onApply({ ...editedData, unit: normalizedUnit, quantity, weight, unitPrice });
     toast.success('已应用语音录入数据');
   };
 
@@ -96,7 +116,7 @@ export const VoiceInputPanel: React.FC<VoiceInputPanelProps> = ({
       </CardHeader>
       <CardContent className="space-y-4">
         {/* 语音输入按钮和说明 */}
-        {!parseResult && (
+        {!parseResult && !isParsing && (
           <div className="text-center space-y-4">
             <div className="flex justify-center">
               <VoiceInputButton
@@ -108,6 +128,21 @@ export const VoiceInputPanel: React.FC<VoiceInputPanelProps> = ({
             <p className="text-sm text-muted-foreground">
               点击麦克风按钮，说出产品信息
             </p>
+
+            <div className="space-y-2 text-left">
+              <Label htmlFor="manual-voice-text">也可以直接输入或粘贴现场话术</Label>
+              <Textarea
+                id="manual-voice-text"
+                value={manualText}
+                onChange={event => setManualText(event.target.value)}
+                placeholder="例如：入库齿轮一百件，单价25元，重量50公斤，材质45号钢"
+                maxLength={1000}
+                className="min-h-20"
+              />
+              <Button type="button" className="w-full" disabled={!manualText.trim()} onClick={() => void handleVoiceResult(manualText)}>
+                解析文字
+              </Button>
+            </div>
             
             {/* 示例话术 */}
             <div className="bg-muted/50 rounded-lg p-3 text-left">
@@ -120,7 +155,7 @@ export const VoiceInputPanel: React.FC<VoiceInputPanelProps> = ({
                   <li
                     key={index}
                     className="text-sm text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
-                    onClick={() => handleVoiceResult(phrase)}
+                    onClick={() => { setManualText(phrase); void handleVoiceResult(phrase); }}
                   >
                     "{phrase}"
                   </li>
@@ -197,7 +232,7 @@ export const VoiceInputPanel: React.FC<VoiceInputPanelProps> = ({
                   id="unitPrice"
                   type="number"
                   step="0.01"
-                  value={editedData.unitPrice || ''}
+                  value={editedData.unitPrice ?? ''}
                   onChange={(e) => handleFieldChange('unitPrice', parseFloat(e.target.value) || 0)}
                   placeholder="如：25"
                   className={editedData.unitPrice === undefined || editedData.unitPrice === null ? 'border-destructive' : ''}

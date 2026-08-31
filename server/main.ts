@@ -13,7 +13,12 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     abortOnError: false,
+    // 产品照片以 Data URL 随入库单提交；Nest/Express 默认 100KB 会让正常拍照直接失败。
+    bodyParser: false,
   });
+  // 服务端仍会逐张校验 2MB、每行最多3张；此处只放宽整单传输上限。
+  app.useBodyParser('json', { limit: '20mb' });
+  app.useBodyParser('urlencoded', { limit: '20mb', extended: true });
   await configureApp(app, { 
     disableSwagger: true,
   });

@@ -13,6 +13,7 @@ import {
 } from '../../database/schema';
 import { OPTIMISTIC_LOCK, PAGINATION } from '../../config/constants';
 import type { InventoryChangeType } from '@shared/api.interface';
+import { parseRangeEndExclusive, parseRangeStart } from '../../common/utils/date-range';
 
 /**
  * 库存服务 - 带乐观锁和状态机
@@ -48,6 +49,15 @@ export class InventoryService {
     originalInboundId?: string;
   }): Promise<void> {
     const changeType = params.changeType || 'inbound';
+    const quantity = Number(params.quantity);
+    const weight = Number(params.weight || 0);
+    if (!Number.isInteger(quantity) || quantity <= 0 || !Number.isFinite(weight) || weight < 0) {
+      throw new BadRequestException('库存增加数量必须为正整数，重量必须为非负数');
+    }
+    if (!params.referenceNo?.trim() || params.referenceNo.trim().length > 255) {
+      throw new BadRequestException('库存操作参考号不能为空且不能超过255个字符');
+    }
+    params = { ...params, quantity, weight, referenceNo: params.referenceNo.trim() };
     
     // 1. 幂等性检查 - 检查是否已处理
     const existingRecord = await this.db
@@ -171,6 +181,20 @@ export class InventoryService {
     changeType?: InventoryChangeType;
   }): Promise<void> {
     const changeType = params.changeType || 'outbound';
+    const quantity = Number(params.quantity);
+    const weight = Number(params.weight || 0);
+    if (!Number.isInteger(quantity) || quantity <= 0 || !Number.isFinite(weight) || weight < 0) {
+      throw new BadRequestException('库存减少数量必须为正整数，重量必须为非负数');
+    }
+    if (!params.referenceNo?.trim() || params.referenceNo.trim().length > 255) {
+      throw new BadRequestException('库存操作参考号不能为空且不能超过255个字符');
+    }
+    params = { ...params, quantity, weight, referenceNo: params.referenceNo.trim() };
+    const [duplicate] = await this.db.select({ id: inventoryRecordTable.id })
+      .from(inventoryRecordTable)
+      .where(eq(inventoryRecordTable.referenceNo, params.referenceNo))
+      .limit(1);
+    if (duplicate) throw new ConflictException(`库存操作 ${params.referenceNo} 已处理`);
     const maxRetries = OPTIMISTIC_LOCK.MAX_RETRIES;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -589,10 +613,10 @@ export class InventoryService {
       conditions.push(eq(inventoryRecordTable.changeType, changeType));
     }
     if (startDate) {
-      conditions.push(sql`${inventoryRecordTable.createdAt} >= ${startDate}`);
+      conditions.push(sql`${inventoryRecordTable.createdAt} >= ${parseRangeStart(startDate)}`);
     }
     if (endDate) {
-      conditions.push(sql`${inventoryRecordTable.createdAt} <= ${endDate}`);
+      conditions.push(sql`${inventoryRecordTable.createdAt} < ${parseRangeEndExclusive(endDate)}`);
     }
 
     // 查询总数
@@ -678,7 +702,16 @@ export class InventoryService {
       throw new ForbiddenException('只有管理员可以直接调整库存，普通用户请走审批流程');
     }
 
-    const { productId, quantityChange, weightChange, operator, reason, remark } = params;
+    const quantityChange = Number(params.quantityChange);
+    const weightChange = Number(params.weightChange || 0);
+    const reason = params.reason?.trim();
+    if (!Number.isInteger(quantityChange) || !Number.isFinite(weightChange) || (quantityChange === 0 && weightChange === 0)) {
+      throw new BadRequestException('库存调整数量必须为整数，且数量或重量至少有一项不为0');
+    }
+    if (!reason || !['inventory_profit', 'inventory_loss', 'damage', 'quality_reject', 'other'].includes(reason)) {
+      throw new BadRequestException('请选择有效的库存调整原因');
+    }
+    const { productId, operator, remark } = params;
 
     const maxRetries = OPTIMISTIC_LOCK.MAX_RETRIES;
 

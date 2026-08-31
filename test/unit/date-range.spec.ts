@@ -12,5 +12,7 @@ describe('date range boundaries', () => {
 
   test('invalid dates are rejected before reaching SQL', () => {
     expect(() => parseRangeStart('not-a-date')).toThrow('无效日期');
+    expect(() => parseRangeStart('2026-02-30')).toThrow('无效日期');
+    expect(() => parseRangeStart('2026-13-01')).toThrow('无效日期');
   });
 });

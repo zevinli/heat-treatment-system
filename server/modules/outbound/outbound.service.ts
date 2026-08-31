@@ -183,6 +183,10 @@ export class OutboundService {
     if (!Array.isArray(data.details) || data.details.length === 0) {
       throw new BadRequestException('出库明细不能为空');
     }
+    if (data.details.length > 500) throw new BadRequestException('单张出库单最多包含500行明细，请拆分后提交');
+    const outboundDate = new Date(data.outboundDate);
+    if (Number.isNaN(outboundDate.getTime())) throw new BadRequestException('出库日期无效');
+    data = { ...data, outboundDate };
 
     let details = data.details.map((detail, index) => {
       const quantity = Number(detail.quantity);
@@ -332,7 +336,7 @@ export class OutboundService {
           weight: detail.weight,
           amount: detail.amount,
           batchNo: selections.map(item => item.batchNo).join(',') || null,
-          inboundDate: detail.inboundDate || null,
+          inboundDate: selections[0]?.inboundDate || detail.inboundDate || null,
           closeOrder: Boolean(detail.closeOrder),
         }).returning();
 
@@ -363,7 +367,7 @@ export class OutboundService {
           weight: detail.weight,
           referenceNo: createdOrder.outboundNo,
           operator: createdOrder.creator || 'system',
-          remark: detail.closeOrder ? '出库并关单，剩余库存继续留存' : '出库单创建，扣减库存',
+          remark: detail.closeOrder ? '出库并标记本行完成，剩余库存继续留存' : '出库单创建，扣减库存',
         });
         await this.feishuOutbox.enqueue(tx, 'outbound', `${createdOrder.id}:${createdDetail.id}`, {
           orderId: createdOrder.outboundNo,
@@ -400,7 +404,7 @@ export class OutboundService {
   }
 
   private async resolveBatchSelections(tx: any, detail: OutboundDetailWithBatch) {
-    type Selection = { batchId: string; batchNo: string; quantity: number; weight: number };
+    type Selection = { batchId: string; batchNo: string; quantity: number; weight: number; inboundDate?: Date | null };
     let requested: Selection[] = [];
 
     if (detail.batchSelections?.length) {
@@ -415,15 +419,20 @@ export class OutboundService {
         weight: Number(item.weight || 0),
       }));
     } else if (detail.batchNo) {
-      const [batch] = await tx.select({ id: productBatchTable.id, batchNo: productBatchTable.batchNo })
+      const [batch] = await tx.select({
+        id: productBatchTable.id,
+        batchNo: productBatchTable.batchNo,
+        inboundDate: productBatchTable.inboundDate,
+      })
         .from(productBatchTable)
         .where(and(eq(productBatchTable.batchNo, detail.batchNo), eq(productBatchTable.productId, detail.productId)));
       if (!batch) throw new NotFoundException(`批次 ${detail.batchNo} 不存在或不属于该产品`);
-      requested = [{ batchId: batch.id, batchNo: batch.batchNo, quantity: detail.quantity, weight: detail.weight }];
+      requested = [{ batchId: batch.id, batchNo: batch.batchNo, quantity: detail.quantity, weight: detail.weight, inboundDate: batch.inboundDate }];
     } else {
       const available = await tx.select({
         batchId: productBatchTable.id,
         batchNo: productBatchTable.batchNo,
+        inboundDate: productBatchTable.inboundDate,
         quantityAvailable: productBatchStockTable.quantityAvailable,
         weightAvailable: productBatchStockTable.weightAvailable,
       }).from(productBatchTable).innerJoin(
@@ -444,7 +453,7 @@ export class OutboundService {
           ? remainingWeight
           : detail.weight * quantity / detail.quantity;
         const weight = Math.min(remainingWeight, batch.weightAvailable, proportionalWeight);
-        requested.push({ batchId: batch.batchId, batchNo: batch.batchNo, quantity, weight });
+        requested.push({ batchId: batch.batchId, batchNo: batch.batchNo, quantity, weight, inboundDate: batch.inboundDate });
         remainingQuantity -= quantity;
         remainingWeight -= weight;
       }
@@ -468,6 +477,7 @@ export class OutboundService {
         quantityAvailable: productBatchStockTable.quantityAvailable,
         weightAvailable: productBatchStockTable.weightAvailable,
         status: productBatchStockTable.status,
+        inboundDate: productBatchTable.inboundDate,
       }).from(productBatchTable).innerJoin(
         productBatchStockTable,
         eq(productBatchTable.id, productBatchStockTable.batchId),
@@ -479,6 +489,7 @@ export class OutboundService {
         throw new BadRequestException(`批次 ${batch.batchNo} 可用库存不足`);
       }
       item.batchNo = batch.batchNo;
+      item.inboundDate = batch.inboundDate;
       quantitySum += item.quantity;
       weightSum += item.weight;
     }

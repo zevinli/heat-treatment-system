@@ -60,6 +60,15 @@ export const TenantProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setCurrentTenant(null);
   };
 
+  useEffect(() => {
+    const handleAuthInvalidated = () => {
+      queryClient.clear();
+      setCurrentTenantState(null);
+    };
+    window.addEventListener('heat-treatment:auth-invalidated', handleAuthInvalidated);
+    return () => window.removeEventListener('heat-treatment:auth-invalidated', handleAuthInvalidated);
+  }, [queryClient]);
+
   return (
     <TenantContext.Provider
       value={{

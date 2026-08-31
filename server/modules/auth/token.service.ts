@@ -29,11 +29,18 @@ export class TokenService {
   }
 
   verify(token: string): AuthTokenPayload {
-    const [body, signature] = token.split('.');
-    if (!body || !signature) throw new UnauthorizedException('无效的登录凭证');
+    const parts = token.split('.');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) throw new UnauthorizedException('无效的登录凭证');
+    const [body, signature] = parts;
+    if (!/^[A-Za-z0-9_-]+$/.test(body) || !/^[A-Za-z0-9_-]+$/.test(signature)) {
+      throw new UnauthorizedException('登录凭证格式无效');
+    }
     const expected = createHmac('sha256', this.secret()).update(body).digest();
     const received = Buffer.from(signature, 'base64url');
-    if (received.length !== expected.length || !timingSafeEqual(received, expected)) {
+    // 拒绝同一字节序列的非规范 Base64URL 表示，避免一个签名出现多个可绕过缓存/黑名单的字符串形式。
+    if (received.toString('base64url') !== signature
+      || received.length !== expected.length
+      || !timingSafeEqual(received, expected)) {
       throw new UnauthorizedException('登录凭证签名无效');
     }
     let payload: AuthTokenPayload;

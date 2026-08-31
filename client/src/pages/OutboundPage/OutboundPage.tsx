@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Search,
   ChevronLeft,
@@ -23,7 +23,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { exportToExcel } from '@/lib/excel-export';
-import { smartPrint } from '@/lib/print-service';
+import { exportElementToPdf, smartPrint } from '@/lib/print-service';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -62,6 +62,7 @@ interface IOutboundDetail {
   outboundWeight: number;
   outboundAmount: number;
   batchNo: string;
+  inboundDate: string;
   process: string;
   material: string;
   closeOrder: boolean;
@@ -69,6 +70,7 @@ interface IOutboundDetail {
 
 const OutboundPage: React.FC = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { currentTenant } = useTenant();
   const operationDefaults = readTenantScopedJson('operation_defaults', currentTenant?.orgCode, {
     creator: '收发', transporter: '', plateNumber: '', driver: '',
@@ -253,73 +255,63 @@ const OutboundPage: React.FC = () => {
   const [currentOutboundNo, setCurrentOutboundNo] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const saveLockRef = useRef(false);
+  const inboundHandoffHandledRef = useRef(false);
 
   const handleSaveAndPrint = async () => {
+    if (!selectedCustomer) {
+      toast.error('请先选择客户');
+      return;
+    }
     if (outboundDetails.length === 0) {
       toast.error('请至少添加一个产品');
       return;
     }
-    // 需求1：数量必须大于0
-    const invalidDetails = outboundDetails.filter(d => d.outboundQuantity <= 0);
+    if (outboundDetails.length > 500) {
+      toast.error(`当前有 ${outboundDetails.length} 个产品，单张出库单最多500个，请拆分后提交`);
+      return;
+    }
+    if (!outboundDate || Number.isNaN(Date.parse(outboundDate))) {
+      toast.error('请选择有效的出库日期');
+      return;
+    }
+    if (!creator.trim()) {
+      toast.error('请填写制单人');
+      return;
+    }
+    // 数量参与库存与批次扣减，必须是正整数。
+    const invalidDetails = outboundDetails.filter(d => !Number.isInteger(d.outboundQuantity) || d.outboundQuantity <= 0);
     if (invalidDetails.length > 0) {
-      toast.error(`请填写出库数量：${invalidDetails.map(d => d.productName).join('、')}`);
+      toast.error(`出库数量必须为大于0的整数：${invalidDetails.map(d => d.productName).join('、')}`);
       return;
     }
 
     // 需求2：出库重量不能为负数
-    const invalidWeightDetails = outboundDetails.filter(d => d.outboundWeight < 0);
+    const invalidWeightDetails = outboundDetails.filter(d => !Number.isFinite(d.outboundWeight) || d.outboundWeight < 0);
     if (invalidWeightDetails.length > 0) {
       toast.error(`出库重量不能为负数：${invalidWeightDetails.map(d => d.productName).join('、')}`);
       return;
     }
+    const missingBillingWeight = outboundDetails.filter(d => d.unit === 'kg' && d.outboundWeight <= 0);
+    if (missingBillingWeight.length > 0) {
+      toast.error(`按 kg 计价的产品必须填写出库重量：${missingBillingWeight.map(d => d.productName).join('、')}`);
+      return;
+    }
 
-    // 检查主要维度库存是否充足（强制）
+    // 数量和重量都是真实库存维度，任一超出都会导致批次库存为负，必须在提交前阻止。
     const insufficientStock = outboundDetails.filter(detail => {
       const product = products.find(p => p.id === detail.productId);
       if (!product) return false;
-
-      // 按kg计价的产品：用重量校验库存重量
-      if (detail.unit === 'kg') {
-        return detail.outboundWeight > (product.stockWeight || 0);
-      }
-      // 按件计价的产品：用数量校验库存数量
-      return detail.outboundQuantity > product.stock;
+      return detail.outboundQuantity > product.stock
+        || detail.outboundWeight > (product.stockWeight || 0) + 0.001;
     });
 
     if (insufficientStock.length > 0) {
       const productNames = insufficientStock.map(d => {
         const product = products.find(p => p.id === d.productId);
-        if (d.unit === 'kg') {
-          return `${d.productName}(库存${product?.stockWeight?.toFixed(2) || 0}kg，需${d.outboundWeight}kg)`;
-        }
-        return `${d.productName}(库存${product?.stock || 0}件，需${d.outboundQuantity}件)`;
+        return `${d.productName}(库存${product?.stock || 0}件/${product?.stockWeight?.toFixed(2) || 0}kg，需${d.outboundQuantity}件/${d.outboundWeight}kg)`;
       }).join('、');
       toast.error(`库存不足：${productNames}`);
       return;
-    }
-
-    // 检查次要维度是否超限（仅警告，不阻止）
-    const warningStock = outboundDetails.filter(detail => {
-      const product = products.find(p => p.id === detail.productId);
-      if (!product) return false;
-
-      // 按kg计价的产品：检查数量是否超出（仅警告）
-      if (detail.unit === 'kg') {
-        return detail.outboundQuantity > product.stock;
-      }
-      // 按件计价的产品：检查重量是否超出（仅警告）
-      return detail.outboundWeight > (product.stockWeight || 0);
-    });
-
-    if (warningStock.length > 0) {
-      const productNames = warningStock.map(d => {
-        const product = products.find(p => p.id === d.productId);
-        if (d.unit === 'kg') {
-          return `${d.productName}(数量超出库存：${product?.stock || 0}件)`;
-        }
-        return `${d.productName}(重量超出库存：${product?.stockWeight?.toFixed(2) || 0}kg)`;
-      }).join('、');
-      toast.warning(`注意：${productNames}，请确认是否继续`);
     }
 
     if (!navigator.onLine) {
@@ -350,18 +342,17 @@ const OutboundPage: React.FC = () => {
         weight: detail.outboundWeight,
         amount: detail.outboundAmount,
         batchNo: detail.batchNo,
-        inboundDate: outboundDate,
         closeOrder: detail.closeOrder,
       }));
 
       // 创建出库单记录（后端会自动扣减库存）
       const order = await addOutboundOrder({
-        customerId: selectedCustomer!.id,
-        customerName: selectedCustomer!.name,
-        customerCode: selectedCustomer!.code,
+        customerId: selectedCustomer.id,
+        customerName: selectedCustomer.name,
+        customerCode: selectedCustomer.code,
         outboundDate,
         creator,
-        receiver: receiver || selectedCustomer!.name,
+        receiver: receiver || selectedCustomer.name,
         transporter: transporter || '自提',
         plateNumber,
         driver,
@@ -373,6 +364,15 @@ const OutboundPage: React.FC = () => {
 
       // 保存后端生成的单号
       setCurrentOutboundNo(order.outboundNo);
+      // 后端才掌握最终 FIFO 批次分配；打印前回填权威批次号和入库日期。
+      setOutboundDetails(current => current.map(detail => {
+        const saved = order.details?.find(item => item.productId === detail.productId);
+        return saved ? {
+          ...detail,
+          batchNo: saved.batchNo || '',
+          inboundDate: saved.inboundDate || detail.inboundDate,
+        } : detail;
+      }));
 
       // 立即刷新产品数据，确保库存显示最新
       await refreshProducts();
@@ -404,8 +404,40 @@ const OutboundPage: React.FC = () => {
   const [showDraftBanner, setShowDraftBanner] = useState(false);
   const [draftTimestamp, setDraftTimestamp] = useState<number | null>(null);
   
+  // 入库完成后的“继续发货”优先于旧草稿：锁定同一客户并直接打开可发货产品。
   // 页面加载时检查是否有草稿 - 静默恢复
   useEffect(() => {
+    const handoff = location.state as {
+      fromInbound?: boolean;
+      customerId?: string;
+      customerCode?: string;
+      inboundNo?: string;
+    } | null;
+    if (handoff?.fromInbound && !inboundHandoffHandledRef.current) {
+      if (!customers.length) return;
+      const customer = customers.find(item => item.id === handoff.customerId || item.code === handoff.customerCode);
+      inboundHandoffHandledRef.current = true;
+      localStorage.removeItem(STORAGE_KEY);
+      if (!customer) {
+        toast.error('未找到刚才入库的客户，请重新选择客户');
+        navigate('/outbound', { replace: true, state: null });
+        return;
+      }
+      setSelectedCustomer(customer);
+      setCurrentStep(2);
+      setOutboundDetails([]);
+      setSelectedProducts([]);
+      setHasDraft(false);
+      setShowDraftBanner(false);
+      setDraftTimestamp(null);
+      setProductDialogOpen(true);
+      toast.success(`已进入 ${customer.name} 的发货环节${handoff.inboundNo ? `（来源：${handoff.inboundNo}）` : ''}`);
+      navigate('/outbound', { replace: true, state: null });
+      return;
+    }
+    // handoff 会立即生成一份新的安全草稿，路由 state 清除后的本次 effect
+    // 不应把这份“刚创建的草稿”误报成历史恢复记录。
+    if (inboundHandoffHandledRef.current) return;
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
@@ -421,7 +453,7 @@ const OutboundPage: React.FC = () => {
         localStorage.removeItem(STORAGE_KEY);
       }
     }
-  }, [STORAGE_KEY]);
+  }, [STORAGE_KEY, customers, location.state, navigate]);
   
   // 自动保存草稿
   useEffect(() => {
@@ -543,8 +575,6 @@ const OutboundPage: React.FC = () => {
       backgroundColor: 'var(--print-bg, #ffffff)', 
       color: 'var(--print-text, #000000)',
       fontFamily: 'SimSun, Songti SC, serif',
-      maxHeight: '270mm',
-      overflow: 'hidden',
       boxSizing: 'border-box'
     }}>
       {/* 公司名称 - 顶部居中 */}
@@ -637,7 +667,7 @@ const OutboundPage: React.FC = () => {
           </tr>
         </thead>
         <tbody>
-          {outboundDetails.slice(0, 8).map((detail, index) => (
+          {outboundDetails.map((detail, index) => (
             <tr key={detail.id}>
               <td style={{ border: '1px solid #666', padding: '3px', textAlign: 'center' }}>{index + 1}</td>
               <td style={{ border: '1px solid #666', padding: '3px' }}>{detail.productName}</td>
@@ -652,12 +682,6 @@ const OutboundPage: React.FC = () => {
               <td style={{ border: '1px solid #666', padding: '3px', textAlign: 'center' }}>{detail.material || '-'}</td>
             </tr>
           ))}
-          {outboundDetails.length > 8 && (
-            <tr>
-              <td style={{ border: '1px solid #666', padding: '3px', textAlign: 'center' }}>...</td>
-              <td style={{ border: '1px solid #666', padding: '3px', textAlign: 'center' }} colSpan={10}>共 {outboundDetails.length} 条记录</td>
-            </tr>
-          )}
           <tr style={{ backgroundColor: 'var(--print-table-footer-bg, #f9fafb)', fontWeight: 'bold' }}>
             <td style={{ border: '1px solid #666', padding: '3px', textAlign: 'center' }} colSpan={4}>合计</td>
             <td style={{ border: '1px solid #666', padding: '3px', textAlign: 'right' }}>
@@ -883,7 +907,7 @@ const OutboundPage: React.FC = () => {
                   <tr>
                     <th className="p-2 text-left text-xs font-medium">序号</th>
                     <th className="p-2 text-left text-xs font-medium">操作</th>
-                    <th className="p-2 text-left text-xs font-medium">关单</th>
+                    <th className="p-2 text-left text-xs font-medium">本行完成</th>
                     <th className="p-2 text-left text-xs font-medium">产品名称</th>
                     <th className="p-2 text-left text-xs font-medium">工件编号</th>
                     <th className="p-2 text-left text-xs font-medium">加工工艺</th>
@@ -1011,10 +1035,10 @@ const OutboundPage: React.FC = () => {
               </div>
             )}
 
-            {/* 关单功能说明 */}
+            {/* 完成标记说明 */}
             <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg">
               <p className="text-sm text-amber-800">
-                <span className="font-medium">关单功能：</span>如实际出库数大于或小于入库数时，可以选择关单功能，这样就可以正常出库，且把库存平账。
+                <span className="font-medium">本行完成：</span>用于标记该产品本次业务已完成。系统只扣减实际填写的数量和重量，未出库库存会继续保留，不会被自动清零。
               </p>
             </div>
           </CardContent>
@@ -1310,7 +1334,7 @@ const OutboundPage: React.FC = () => {
           </div>
           
           <PrintPreview />
-          <div className="flex justify-end gap-2 mt-4 no-print">
+          <div className="flex flex-wrap justify-end gap-2 mt-4 no-print">
             <Button
               variant="outline"
               onClick={handleClosePrintDialog}
@@ -1352,12 +1376,16 @@ const OutboundPage: React.FC = () => {
               <Download className="w-4 h-4 mr-2" />
               导出Excel
             </Button>
-            <Button onClick={() => {
-              // 延迟打印，确保Dialog内容完全渲染
-              setTimeout(() => {
-                smartPrint('print-preview-content', '送货单').catch(() => undefined);
-              }, 500);
-            }}>
+            <Button
+              variant="outline"
+              onClick={() => void exportElementToPdf('print-preview-content', `${currentOutboundNo || '送货单'}.pdf`)
+                .then(() => toast.success('PDF已导出'))
+                .catch(error => toast.error(error instanceof Error ? error.message : 'PDF导出失败'))}
+            >
+              <Download className="w-4 h-4 mr-2" />
+              导出PDF
+            </Button>
+            <Button onClick={() => void smartPrint('print-preview-content', '送货单').catch(() => undefined)}>
               <Printer className="w-4 h-4 mr-2" />
               打印送货单
             </Button>

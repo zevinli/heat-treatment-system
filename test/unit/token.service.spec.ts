@@ -25,4 +25,9 @@ describe('TokenService', () => {
     const token = service.sign(payload, -1);
     expect(() => service.verify(token)).toThrow('登录已过期');
   });
+
+  it('rejects tokens with extra segments', () => {
+    const token = service.sign(payload, 60);
+    expect(() => service.verify(`${token}.extra`)).toThrow(UnauthorizedException);
+  });
 });

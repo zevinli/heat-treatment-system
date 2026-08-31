@@ -29,6 +29,8 @@ axiosForBackend.interceptors.response.use(
       localStorage.removeItem('currentOrgId');
       localStorage.removeItem('currentOrgCode');
       localStorage.removeItem('currentOrgName');
+      (globalThis as { dispatchEvent?: (event: Event) => boolean })
+        .dispatchEvent?.(new Event('heat-treatment:auth-invalidated'));
     }
     return Promise.reject(error);
   },

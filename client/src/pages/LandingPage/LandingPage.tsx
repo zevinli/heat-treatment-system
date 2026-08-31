@@ -531,7 +531,7 @@ const modules = [
   },
   {
     title: '快速发货',
-    description: '智能批次推荐，灵活分批发货，支持部分发货和关单平账',
+    description: '智能批次推荐，灵活分批发货，按实际数量扣减并保留剩余库存',
     icon: Truck,
     href: '/outbound',
     stats: '按批次扣减库存',

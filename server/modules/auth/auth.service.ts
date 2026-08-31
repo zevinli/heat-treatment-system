@@ -24,6 +24,14 @@ export class AuthService {
     return expected.length === actual.length && timingSafeEqual(expected, actual);
   }
 
+  private isSafeAvatar(value: string): boolean {
+    if (value.startsWith('https://')) return value.length <= 2_048;
+    const match = /^data:image\/(?:png|jpe?g|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(value);
+    if (!match) return false;
+    const bytes = Buffer.from(match[1], 'base64');
+    return bytes.length > 0 && bytes.length <= 1024 * 1024;
+  }
+
   private async ensureBootstrapAdmin(username: string, password: string) {
     const [{ count }] = await this.db.select({ count: sql<number>`count(*)::int` }).from(appUserTable);
     if (count > 0) return;
@@ -54,7 +62,7 @@ export class AuthService {
     const outcome = await this.db.transaction(async (tx: any) => {
       // 锁定账号行，使设备数检查与会话创建串行化，避免并发登录同时越过上限。
       const [user] = await tx.select().from(appUserTable)
-        .where(eq(appUserTable.username, username.trim())).limit(1).for('update');
+        .where(sql`lower(${appUserTable.username}) = lower(${username.trim()})`).limit(1).for('update');
       if (!user || user.status !== 'active') {
         return { error: '用户名或密码错误' };
       }
@@ -109,12 +117,14 @@ export class AuthService {
   }
 
   /** 邀请加入组织前先创建一个无租户数据权限的基础账号。 */
-  async register(data: { username: string; password: string; name: string }) {
-    return this.createUserInternal({
+  async register(data: { username: string; password: string; name: string; deviceName?: string }) {
+    const created = await this.createUserInternal({
       ...data,
       role: 'viewer',
       deviceLimit: 3,
     });
+    // 注册即建立登录会话，避免用户成功创建账号后还要重复输入一次密码。
+    return this.login(created.username, data.password, data.deviceName);
   }
 
   async updateSelf(id: string, data: {
@@ -132,9 +142,8 @@ export class AuthService {
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new BadRequestException('邮箱格式不正确');
     const phone = data.phone?.trim();
     if (phone && !/^[0-9+()\-\s]{6,30}$/.test(phone)) throw new BadRequestException('手机号格式不正确');
-    if (data.avatar && data.avatar.length > 1_500_000) throw new BadRequestException('头像数据过大');
-    if (data.avatar && !data.avatar.startsWith('data:image/') && !data.avatar.startsWith('https://')) {
-      throw new BadRequestException('头像地址不合法');
+    if (data.avatar && !this.isSafeAvatar(data.avatar)) {
+      throw new BadRequestException('头像仅支持不超过1MB的 PNG/JPG/WebP/GIF，或有效 HTTPS 地址');
     }
     const [updated] = await this.db.update(appUserTable).set({
       ...(data.name !== undefined ? { name } : {}),
@@ -152,7 +161,9 @@ export class AuthService {
 
   async changePassword(id: string, tokenId: string, currentPassword: string, newPassword: string) {
     if (!currentPassword) throw new BadRequestException('请输入当前密码');
-    if (!newPassword || newPassword.length < 8) throw new BadRequestException('新密码至少8位');
+    if (!newPassword || newPassword.length < 8 || newPassword.length > 128) {
+      throw new BadRequestException('新密码长度需为8-128位');
+    }
     if (currentPassword === newPassword) throw new BadRequestException('新密码不能与当前密码相同');
     const [user] = await this.db.select().from(appUserTable).where(eq(appUserTable.id, id)).limit(1);
     if (!user || !this.verifyPassword(currentPassword, user.passwordHash)) {
@@ -204,15 +215,17 @@ export class AuthService {
       throw new BadRequestException('用户名需为3-50位字母、数字、点、横线或下划线');
     }
     if (!name) throw new BadRequestException('姓名不能为空');
-    if (!data.password || data.password.length < 8) throw new BadRequestException('初始密码至少8位');
+    if (!data.password || data.password.length < 8 || data.password.length > 128) {
+      throw new BadRequestException('密码长度需为8-128位');
+    }
     if (!['admin', 'operator', 'finance', 'viewer'].includes(data.role)) throw new BadRequestException('无效角色');
     const deviceLimit = Number(data.deviceLimit || 3);
     if (!Number.isInteger(deviceLimit) || deviceLimit < 1 || deviceLimit > 10) {
       throw new BadRequestException('设备上限必须为1-10的整数');
     }
     const [duplicate] = await this.db.select({ id: appUserTable.id }).from(appUserTable)
-      .where(eq(appUserTable.username, username)).limit(1);
-    if (duplicate) throw new BadRequestException('用户名已存在');
+      .where(sql`lower(${appUserTable.username}) = lower(${username})`).limit(1);
+    if (duplicate) throw new ConflictException('用户名已存在');
     try {
       const [created] = await this.db.insert(appUserTable).values({
         username,
@@ -275,7 +288,9 @@ export class AuthService {
 
   async resetPassword(id: string, password: string, actorId: string) {
     await this.assertPlatformAdmin(actorId);
-    if (!password || password.length < 8) throw new BadRequestException('新密码至少8位');
+    if (!password || password.length < 8 || password.length > 128) {
+      throw new BadRequestException('新密码长度需为8-128位');
+    }
     const [updated] = await this.db.update(appUserTable).set({
       passwordHash: this.hashPassword(password), updatedAt: new Date(),
     }).where(eq(appUserTable.id, id)).returning({ id: appUserTable.id });

@@ -49,6 +49,7 @@ import { useAppPermission } from '@/hooks/useAppPermission';
 import { useFeishuRuntimeConfig } from '@/components/FeishuLinkButton';
 import { useTenant } from '@/contexts/TenantContext';
 import { tenantScopedStorageKey } from '@/lib/tenant-storage';
+import { getCurrentUser } from '@/lib/auth-session';
 
 // KPI卡片组件
 interface KPICardProps {
@@ -560,6 +561,9 @@ const DashboardPage: React.FC = () => {
   const canManageSettings = useAppPermission('system:settings');
   const { data: feishuConfig, isLoading: feishuLoading } = useFeishuRuntimeConfig();
   const currentProfile = useCurrentUserProfile();
+  // 独立部署时飞书运行时用户资料可能为空，优先回退到本系统登录会话。
+  const sessionUser = getCurrentUser();
+  const displayName = currentProfile?.name || sessionUser?.name || '用户';
   const [currentDate, setCurrentDate] = useState<string>('');
   const [messageDialogOpen, setMessageDialogOpen] = useState(false);
   const [greeting, setGreeting] = useState('');
@@ -770,12 +774,12 @@ const DashboardPage: React.FC = () => {
           <div className="flex items-center gap-3">
             <Avatar className="h-10 w-10 border-2 border-primary/20">
               <AvatarFallback className="bg-gradient-to-br from-primary to-primary-dark text-white font-semibold">
-                {currentProfile?.name?.charAt(0) || 'U'}
+                {displayName.charAt(0) || 'U'}
               </AvatarFallback>
             </Avatar>
             <div>
               <h1 className="text-2xl font-bold tracking-tight">
-                {greeting}，{currentProfile?.name || '用户'}
+                {greeting}，{displayName}
               </h1>
               <p className="text-sm text-muted-foreground">{currentDate}</p>
             </div>

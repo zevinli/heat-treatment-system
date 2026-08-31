@@ -203,8 +203,15 @@ const CustomerListPage: React.FC = () => {
 
   // 处理导入的客户数据
   const handleImportCustomers = async (importedCustomers: Partial<Customer>[]) => {
-    // 检查编码是否已存在
-    const existingCodes = new Set(customers.map(c => c.code.trim().toLowerCase()));
+    // 当前列表可能正在搜索或筛选，不能拿可见行判断全租户重复编码。
+    // 确认导入前重新分页读取完整客户集，避免“预览通过、保存时全部失败”。
+    const allExistingCustomers: Customer[] = [];
+    for (let page = 1; page <= 50; page++) {
+      const response = await getCustomers({ page, pageSize: 500 });
+      allExistingCustomers.push(...response.items);
+      if (allExistingCustomers.length >= Number(response.total || 0) || response.items.length < 500) break;
+    }
+    const existingCodes = new Set(allExistingCustomers.map(c => c.code.trim().toLowerCase()));
     const seenCodes = new Set(existingCodes);
     const duplicates: string[] = [];
     const validCustomers = importedCustomers.filter((customer) => {
@@ -223,8 +230,7 @@ const CustomerListPage: React.FC = () => {
     }
 
     if (validCustomers.length === 0) {
-      toast.error('没有有效的客户数据可导入');
-      return;
+      throw new Error('没有可导入的新客户，请修正重复编号后重试');
     }
 
     // 批量创建
@@ -234,16 +240,16 @@ const CustomerListPage: React.FC = () => {
     for (const customer of validCustomers) {
       try {
         await createCustomer({
-          code: customer.code!,
-          name: customer.name!,
-          contact: customer.contact ?? undefined,
-          phone: customer.phone ?? undefined,
-          address: customer.address ?? undefined,
-          transport: customer.transport ?? undefined,
-          paymentTerm: customer.paymentTerm ?? undefined,
-          deliveryDirection: customer.deliveryDirection ?? undefined,
-          settlement: customer.settlement ?? undefined,
-          category: customer.category ?? undefined,
+          code: customer.code!.trim(),
+          name: customer.name!.trim(),
+          contact: customer.contact?.trim() || undefined,
+          phone: customer.phone?.trim() || undefined,
+          address: customer.address?.trim() || undefined,
+          transport: customer.transport?.trim() || undefined,
+          paymentTerm: customer.paymentTerm?.trim() || undefined,
+          deliveryDirection: customer.deliveryDirection?.trim() || undefined,
+          settlement: customer.settlement?.trim() || undefined,
+          category: customer.category?.trim() || undefined,
           status: customer.status || 'active',
         });
         successCount++;
@@ -1082,105 +1088,33 @@ const ImportCustomerDialog: React.FC<ImportCustomerDialogProps> = ({
   const [editFormData, setEditFormData] = useState<Partial<Customer>>({});
   const [validationErrors, setValidationErrors] = useState<{ row: number; message: string }[]>([]);
   const [isImporting, setIsImporting] = useState(false);
+  const [isParsing, setIsParsing] = useState(false);
 
-  const existingCodes = new Set(existingCustomers.map(c => c.code));
+  const normalizeCode = (value: unknown) => String(value ?? '').trim().toLowerCase();
+  const normalizeCell = (value: unknown) => String(value ?? '').trim();
+  const existingCodes = new Set(existingCustomers.map(c => normalizeCode(c.code)).filter(Boolean));
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const data = event.target?.result;
-        if (data) {
-          import('@e965/xlsx').then((XLSX) => {
-            const workbook = XLSX.read(data, { type: 'binary' });
-            const sheetName = workbook.SheetNames[0];
-            const worksheet = workbook.Sheets[sheetName];
-            const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as string[][];
-            
-            if (jsonData.length < 2) {
-              toast.error('Excel文件数据不足');
-              return;
-            }
-
-            // 智能匹配字段
-            const headers = jsonData[0];
-            const fieldMapping = detectCustomerFields(headers);
-            
-            const parsedData: Partial<Customer>[] = [];
-            const errors: { row: number; message: string }[] = [];
-            
-            for (let i = 1; i < jsonData.length; i++) {
-              const row = jsonData[i];
-              if (row.length === 0) continue;
-              
-              const customer: Partial<Customer> = {};
-              headers.forEach((header, index) => {
-                const field = fieldMapping[header];
-                if (field && row[index] !== undefined) {
-                  (customer as Record<string, unknown>)[field] = row[index];
-                }
-              });
-              
-              // 数据校验
-              if (!customer.code) {
-                errors.push({ row: i, message: '客户编号不能为空' });
-              } else if (existingCodes.has(customer.code)) {
-                errors.push({ row: i, message: `客户编码 ${customer.code} 已存在` });
-              }
-              
-              if (!customer.name) {
-                errors.push({ row: i, message: '客户名称不能为空' });
-              }
-              
-              // 设置默认值
-              if (!customer.status) customer.status = 'active';
-              if (!customer.inboundCount) customer.inboundCount = 0;
-              
-              parsedData.push(customer);
-            }
-            
-            setPreviewData(parsedData);
-            setValidationErrors(errors);
-            setStep('preview');
-            
-            if (errors.length > 0) {
-              toast.warning(`解析完成，发现 ${errors.length} 处错误，请检查`);
-            } else {
-              toast.success(`成功解析 ${parsedData.length} 条客户数据`);
-            }
-          });
-        }
-      } catch (error) {
-        toast.error('解析Excel文件失败');
-        logger.error(error);
-      }
-    };
-    reader.readAsBinaryString(file);
-  };
-
-  const detectCustomerFields = (headers: string[]): Record<string, string> => {
-    const mapping: Record<string, string> = {};
+  const detectCustomerFields = (headers: unknown[]): Record<number, string> => {
+    const mapping: Record<number, string> = {};
     const fieldKeywords: Record<string, string[]> = {
-      code: ['编号', '编码', 'code', '客户编号', '客户编码'],
-      name: ['名称', '客户名称', 'name', '客户'],
-      contact: ['联系人', 'contact', '联系人姓名', '负责人'],
-      phone: ['电话', '联系电话', 'phone', '手机', 'tel'],
-      address: ['地址', '客户地址', 'address', '详细地址'],
-      transport: ['运输方式', '运输', 'transport', '运送方式'],
-      paymentTerm: ['付款期', '付款期限', 'paymentTerm', '账期'],
-      deliveryDirection: ['送货方向', '送货', 'deliveryDirection', '发货方向'],
-      settlement: ['结算方式', '结算', 'settlement', '结账方式'],
-      category: ['分类', '客户分类', 'category', '类别', '类型'],
+      code: ['客户编号', '客户编码', '编号', '编码', 'customer code', 'code'],
+      name: ['客户名称', '客户名', '名称', 'customer name', 'name', '客户'],
+      contact: ['联系人姓名', '联系人', '负责人', 'contact'],
+      phone: ['联系电话', '手机号', '手机', '电话', 'phone', 'tel'],
+      address: ['详细地址', '客户地址', '地址', 'address'],
+      transport: ['运输方式', '运送方式', '运输', 'transport'],
+      paymentTerm: ['付款期限', '付款期', '账期', 'payment term', 'paymentterm'],
+      deliveryDirection: ['送货方向', '发货方向', 'delivery direction', 'deliverydirection'],
+      settlement: ['结算方式', '结账方式', '结算', 'settlement'],
+      category: ['客户分类', '分类', '类别', '类型', 'category'],
     };
 
-    headers.forEach((header) => {
-      const headerLower = header.toLowerCase();
+    headers.forEach((header, index) => {
+      const normalizedHeader = normalizeCell(header).toLowerCase().replace(/[\s_-]+/g, '');
+      if (!normalizedHeader) return;
       for (const [field, keywords] of Object.entries(fieldKeywords)) {
-        if (keywords.some(k => headerLower.includes(k.toLowerCase()))) {
-          mapping[header] = field;
+        if (keywords.some(keyword => normalizedHeader.includes(keyword.toLowerCase().replace(/[\s_-]+/g, '')))) {
+          mapping[index] = field;
           break;
         }
       }
@@ -1189,10 +1123,101 @@ const ImportCustomerDialog: React.FC<ImportCustomerDialogProps> = ({
     return mapping;
   };
 
+  const validatePreviewData = (data: Partial<Customer>[]) => {
+    const errors: { row: number; message: string }[] = [];
+    const seenCodes = new Set(existingCodes);
+    data.forEach((customer, index) => {
+      const code = normalizeCell(customer.code);
+      const normalizedCode = normalizeCode(code);
+      const name = normalizeCell(customer.name);
+      if (!code) {
+        errors.push({ row: index + 1, message: '客户编号不能为空' });
+      } else if (seenCodes.has(normalizedCode)) {
+        errors.push({ row: index + 1, message: `客户编码 ${code} 已存在或在文件中重复` });
+      } else {
+        seenCodes.add(normalizedCode);
+      }
+      if (!name) errors.push({ row: index + 1, message: '客户名称不能为空' });
+    });
+    return errors;
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    if (!extension || !['xlsx', 'xls', 'csv'].includes(extension)) {
+      toast.error('仅支持 .xlsx、.xls 或 .csv 文件');
+      e.target.value = '';
+      return;
+    }
+    if (file.size === 0 || file.size > 10 * 1024 * 1024) {
+      toast.error(file.size === 0 ? '文件内容为空' : '文件不能超过 10MB');
+      e.target.value = '';
+      return;
+    }
+
+    setIsParsing(true);
+    try {
+      const XLSX = await import('@e965/xlsx');
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+      let bestCandidate: { sheetName: string; rows: unknown[][]; headerIndex: number; mapping: Record<number, string>; score: number } | null = null;
+
+      for (const sheetName of workbook.SheetNames) {
+        const worksheet = workbook.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1, defval: '', raw: false });
+        if (rows.length > 5001) throw new Error(`工作表“${sheetName}”超过 5000 行，请拆分后导入`);
+        for (let headerIndex = 0; headerIndex < Math.min(rows.length, 25); headerIndex++) {
+          const mapping = detectCustomerFields(rows[headerIndex]);
+          const fields = new Set(Object.values(mapping));
+          const score = fields.size + (fields.has('code') ? 4 : 0) + (fields.has('name') ? 4 : 0);
+          const hasBusinessRows = rows.slice(headerIndex + 1).some(row => row.some(cell => normalizeCell(cell)));
+          if (hasBusinessRows && (!bestCandidate || score > bestCandidate.score)) {
+            bestCandidate = { sheetName, rows, headerIndex, mapping, score };
+          }
+        }
+      }
+
+      if (!bestCandidate || !Object.values(bestCandidate.mapping).includes('code') || !Object.values(bestCandidate.mapping).includes('name')) {
+        throw new Error('未找到包含“客户编号”和“客户名称”的有效表头（会自动检查所有工作表前25行）');
+      }
+
+      const parsedData: Partial<Customer>[] = [];
+      for (const row of bestCandidate.rows.slice(bestCandidate.headerIndex + 1)) {
+        if (!row.some(cell => normalizeCell(cell))) continue;
+        const customer: Partial<Customer> = { status: 'active', inboundCount: 0 };
+        Object.entries(bestCandidate.mapping).forEach(([columnIndex, field]) => {
+          const value = normalizeCell(row[Number(columnIndex)]);
+          if (value) (customer as Record<string, unknown>)[field] = value;
+        });
+        parsedData.push(customer);
+        if (parsedData.length > 500) throw new Error('一次最多导入 500 条客户，请拆分文件后重试');
+      }
+      if (parsedData.length === 0) throw new Error('表头下没有可导入的客户数据');
+
+      const errors = validatePreviewData(parsedData);
+      setPreviewData(parsedData);
+      setValidationErrors(errors);
+      setStep('preview');
+      if (errors.length > 0) {
+        toast.warning(`已从“${bestCandidate.sheetName}”解析 ${parsedData.length} 条，发现 ${errors.length} 处错误`);
+      } else {
+        toast.success(`已从“${bestCandidate.sheetName}”成功解析 ${parsedData.length} 条客户数据`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '文件格式无法识别';
+      toast.error(`解析客户文件失败：${message}`);
+      logger.error(error);
+    } finally {
+      setIsParsing(false);
+      e.target.value = '';
+    }
+  };
+
   const handleDeleteRow = (index: number) => {
-    setPreviewData(prev => prev.filter((_, i) => i !== index));
-    // 清除对应行的错误
-    setValidationErrors(prev => prev.filter(e => e.row !== index + 1));
+    const next = previewData.filter((_, i) => i !== index);
+    setPreviewData(next);
+    setValidationErrors(validatePreviewData(next));
   };
 
   const handleEditRow = (index: number) => {
@@ -1202,28 +1227,14 @@ const ImportCustomerDialog: React.FC<ImportCustomerDialogProps> = ({
 
   const handleSaveEdit = () => {
     if (editingRow !== null) {
-      // 校验编辑后的数据
-      const newErrors: { row: number; message: string }[] = [];
-      if (!editFormData.code) {
-        newErrors.push({ row: editingRow + 1, message: '客户编号不能为空' });
-      } else if (existingCodes.has(editFormData.code) && editFormData.code !== previewData[editingRow].code) {
-        newErrors.push({ row: editingRow + 1, message: `客户编码 ${editFormData.code} 已存在` });
-      }
-      if (!editFormData.name) {
-        newErrors.push({ row: editingRow + 1, message: '客户名称不能为空' });
-      }
-      
-      // 更新数据和错误
-      setPreviewData(prev => {
-        const newData = [...prev];
-        newData[editingRow] = editFormData;
-        return newData;
-      });
-      
-      setValidationErrors(prev => [
-        ...prev.filter(e => e.row !== editingRow + 1),
-        ...newErrors,
-      ]);
+      const next = [...previewData];
+      next[editingRow] = {
+        ...editFormData,
+        code: normalizeCell(editFormData.code),
+        name: normalizeCell(editFormData.name),
+      };
+      setPreviewData(next);
+      setValidationErrors(validatePreviewData(next));
       
       setEditingRow(null);
       setEditFormData({});
@@ -1279,17 +1290,19 @@ const ImportCustomerDialog: React.FC<ImportCustomerDialogProps> = ({
               <FileSpreadsheet className="w-12 h-12 mx-auto mb-4 text-muted-foreground" />
               <p className="text-lg font-medium mb-2">上传Excel文件</p>
               <p className="text-sm text-muted-foreground mb-4">
-                支持 .xlsx, .xls 格式，系统会自动识别列名并匹配字段
+                支持 .xlsx、.xls、.csv，自动检查所有工作表并识别前 25 行内的表头
               </p>
               <p className="text-xs text-muted-foreground mb-4">
                 建议列名：客户编号、客户名称、客户简称、助记码、联系人、联系电话、地址、运输方式、付款期、送货方向、结算方式、客户分类、备注
               </p>
               <Input
                 type="file"
-                accept=".xlsx,.xls"
+                accept=".xlsx,.xls,.csv"
                 onChange={handleFileUpload}
+                disabled={isParsing}
                 className="max-w-sm mx-auto"
               />
+              {isParsing && <p className="mt-3 text-sm text-muted-foreground">正在智能识别，请稍候…</p>}
             </div>
           </div>
         ) : (

@@ -450,7 +450,7 @@ const PermissionPage: React.FC = () => {
 
   const handleConfirmResetPassword = async () => {
     if (resettingUserId) {
-      if (newPassword.length < 8) return toast.error('新密码至少8位');
+      if (newPassword.length < 8 || newPassword.length > 128) return toast.error('新密码长度需为8-128位');
       try {
         await api.resetAuthUserPassword(resettingUserId, newPassword);
         toast.success('密码已重置，用户现有登录会话已退出');

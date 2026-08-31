@@ -65,6 +65,8 @@ import { exportToExcel, getProductExportColumns } from '@/utils/excelExport';
 import { SmartExcelImportDialog } from '@/components/SmartExcelImportDialog';
 import { useAppPermission } from '@/hooks/useAppPermission';
 import { createProduct } from '@/api';
+import { useTenant } from '@/contexts/TenantContext';
+import { tenantScopedStorageKey } from '@/lib/tenant-storage';
 import {
   Filter,
   FilterContent,
@@ -112,9 +114,9 @@ const processOptions = ['', '调质+高频淬火', '渗碳淬火', '氮化处理
 const unitOptions = ['件', 'kg'];
 
 // 从本地存储获取自定义材质选项
-const getStoredMaterialOptions = (): string[] => {
+const getStoredMaterialOptions = (orgCode?: string): string[] => {
   try {
-    const stored = localStorage.getItem('customMaterialOptions');
+    const stored = localStorage.getItem(tenantScopedStorageKey('custom_material_options', orgCode));
     if (stored) {
       const parsed = JSON.parse(stored);
       return [...new Set([...defaultMaterialOptions, ...parsed])];
@@ -126,12 +128,15 @@ const getStoredMaterialOptions = (): string[] => {
 };
 
 // 保存自定义材质选项到本地存储
-const saveMaterialOption = (option: string) => {
+const saveMaterialOption = (option: string, orgCode?: string) => {
   try {
-    const current = getStoredMaterialOptions();
+    const current = getStoredMaterialOptions(orgCode);
     if (!current.includes(option)) {
       const newOptions = [...current, option];
-      localStorage.setItem('customMaterialOptions', JSON.stringify(newOptions.filter(o => !defaultMaterialOptions.includes(o))));
+      localStorage.setItem(
+        tenantScopedStorageKey('custom_material_options', orgCode),
+        JSON.stringify(newOptions.filter(o => !defaultMaterialOptions.includes(o))),
+      );
     }
   } catch {
     // ignore
@@ -140,6 +145,7 @@ const saveMaterialOption = (option: string) => {
 
 const ProductListPage: React.FC = () => {
   const navigate = useNavigate();
+  const { currentTenant } = useTenant();
   // 使用 useData hook 获取产品数据和操作函数
   const { 
     products, 
@@ -165,8 +171,12 @@ const ProductListPage: React.FC = () => {
   const [formData, setFormData] = useState<IProductFormData>(initialFormData);
   
   // 材质选项（包含用户自定义的）
-  const [materialOptions, setMaterialOptions] = useState<string[]>(getStoredMaterialOptions());
+  const [materialOptions, setMaterialOptions] = useState<string[]>(() => getStoredMaterialOptions(currentTenant?.orgCode));
   const [materialPopoverOpen, setMaterialPopoverOpen] = useState(false);
+
+  useEffect(() => {
+    setMaterialOptions(getStoredMaterialOptions(currentTenant?.orgCode));
+  }, [currentTenant?.orgCode]);
   
   // Excel导入相关状态
   const [importDialogOpen, setImportDialogOpen] = useState(false);
@@ -425,9 +435,9 @@ const ProductListPage: React.FC = () => {
 
     // 保存自定义材质到本地存储
     if (formData.material && !defaultMaterialOptions.includes(formData.material)) {
-      saveMaterialOption(formData.material);
+      saveMaterialOption(formData.material, currentTenant?.orgCode);
       // 更新材质选项列表
-      setMaterialOptions(getStoredMaterialOptions());
+      setMaterialOptions(getStoredMaterialOptions(currentTenant?.orgCode));
     }
 
     try {
@@ -820,7 +830,7 @@ const ProductListPage: React.FC = () => {
                             const newMaterial = formData.material.trim();
                             if (newMaterial && !materialOptions.includes(newMaterial)) {
                               // 保存到本地存储
-                              saveMaterialOption(newMaterial);
+                              saveMaterialOption(newMaterial, currentTenant?.orgCode);
                               // 更新选项列表
                               setMaterialOptions(prev => [...prev, newMaterial]);
                               // 关闭弹窗

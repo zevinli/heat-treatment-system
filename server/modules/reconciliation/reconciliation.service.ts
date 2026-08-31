@@ -78,6 +78,7 @@ export class ReconciliationService {
 
   // 获取所有对账单
   async findAll(params: {
+    search?: string;
     customerId?: string;
     status?: string;
     month?: string;
@@ -85,7 +86,7 @@ export class ReconciliationService {
     pageSize?: number;
     includeVoided?: boolean;
   }) {
-    const { customerId, status, month, page = 1, pageSize = 10, includeVoided = false } = params;
+    const { search, customerId, status, month, page = 1, pageSize = 10, includeVoided = false } = params;
 
     const conditions = [];
 
@@ -96,6 +97,10 @@ export class ReconciliationService {
 
     if (customerId) {
       conditions.push(eq(reconciliationTable.customerId, customerId));
+    }
+    if (search?.trim()) {
+      const pattern = `%${search.trim()}%`;
+      conditions.push(sql`(${reconciliationTable.reconciliationNo} ILIKE ${pattern} OR ${reconciliationTable.customerName} ILIKE ${pattern})`);
     }
     if (status && status !== 'all') {
       conditions.push(eq(reconciliationTable.status, status));
@@ -601,7 +606,7 @@ export class ReconciliationService {
   }
 
   // 添加开票记录
-  async addInvoice(id: string, amount: number) {
+  async addInvoice(id: string, amount: number, operator: string) {
     const existing = await this.findById(id);
     if (!existing) {
       throw new NotFoundException('对账单不存在');
@@ -619,10 +624,11 @@ export class ReconciliationService {
     }
 
     // 更新开票记录数组
-    const invoiceRecords = (existing.invoiceRecords as Array<{ amount: number; date: string }>) || [];
+    const invoiceRecords = (existing.invoiceRecords as Array<{ amount: number; date: string; operator?: string }>) || [];
     invoiceRecords.push({
       amount,
       date: new Date().toISOString(),
+      operator,
     });
 
     const updated = await this.db.transaction(async (tx) => {
@@ -652,7 +658,7 @@ export class ReconciliationService {
   }
 
   // 添加回款记录
-  async addReceipt(id: string, amount: number) {
+  async addReceipt(id: string, amount: number, operator: string) {
     const existing = await this.findById(id);
     if (!existing) {
       throw new NotFoundException('对账单不存在');
@@ -671,10 +677,11 @@ export class ReconciliationService {
     }
 
     // 更新回款记录数组
-    const receiptRecords = (existing.receiptRecords as Array<{ amount: number; date: string }>) || [];
+    const receiptRecords = (existing.receiptRecords as Array<{ amount: number; date: string; operator?: string }>) || [];
     receiptRecords.push({
       amount,
       date: new Date().toISOString(),
+      operator,
     });
 
     const isFullyPaid = newReceiptAmountCents >= existing.finalAmountCents;

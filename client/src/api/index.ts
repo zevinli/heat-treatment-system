@@ -725,9 +725,10 @@ export async function createInboundOrder(data: {
     inboundType?: string;
     process?: string;
     material?: string;
-    techRequirement?: string;
-    urgent?: boolean;
-  }>;
+      techRequirement?: string;
+      urgent?: boolean;
+      attachments?: string[];
+    }>;
 }) {
   try {
     const response = await axiosForBackend({

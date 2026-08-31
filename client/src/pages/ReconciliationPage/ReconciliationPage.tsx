@@ -322,6 +322,7 @@ const ReconciliationPage: React.FC = () => {
       // 入库日期筛选（检查明细中的入库日期）
       if (inboundStartDate || inboundEndDate) {
         const hasMatchingInboundDate = order.details.some(d => {
+          if (!d.inboundDate) return false;
           if (inboundStartDate && d.inboundDate < inboundStartDate) return false;
           if (inboundEndDate && d.inboundDate > inboundEndDate) return false;
           return true;

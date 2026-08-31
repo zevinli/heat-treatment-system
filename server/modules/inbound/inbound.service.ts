@@ -17,6 +17,7 @@ import {
   inventoryRecordTable,
   productBatchTable,
   productBatchStockTable,
+  outboundBatchDetailTable,
   undoLogTable,
   customer,
   operationLogTable,
@@ -172,6 +173,10 @@ export class InboundService {
     }>;
   }) {
     if (!Array.isArray(data.details) || data.details.length === 0) throw new BadRequestException('入库明细不能为空');
+    if (data.details.length > 500) throw new BadRequestException('单张入库单最多包含500行明细，请拆分后提交');
+    const inboundDate = new Date(data.inboundDate);
+    if (Number.isNaN(inboundDate.getTime())) throw new BadRequestException('入库日期无效');
+    data = { ...data, inboundDate };
     let details = data.details.map((detail, index) => {
       const quantity = Number(detail.quantity);
       const weight = Number(detail.weight || 0);
@@ -188,7 +193,18 @@ export class InboundService {
       if (attachments.length > 3 || attachments.some(file => !this.isValidInboundImage(file))) {
         throw new BadRequestException(`第 ${index + 1} 行最多上传3张 PNG/JPG/WebP/GIF/BMP/TIFF/ICO 图片，每张不超过2MB`);
       }
-      return { ...detail, quantity, weight, unitPrice, amount, attachments };
+      if (detail.batchNo && detail.batchNo.trim().length > 255) {
+        throw new BadRequestException(`第 ${index + 1} 行批次号不能超过255个字符`);
+      }
+      return {
+        ...detail,
+        quantity,
+        weight,
+        unitPrice,
+        amount,
+        attachments,
+        batchNo: detail.batchNo?.trim() || undefined,
+      };
     });
     // 自动通过 customerCode 查找 customerId（若未传）
     let customerId = data.customerId;
@@ -328,11 +344,20 @@ export class InboundService {
       // 生成或使用传入的批次号
       const batchNo = detail.batchNo || this.generateBatchNo(customerRecord.code);
 
+      if (detail.batchNo) {
+        const [duplicateBatch] = await tx.select({ id: productBatchTable.id })
+          .from(productBatchTable)
+          .where(eq(productBatchTable.batchNo, batchNo))
+          .limit(1);
+        if (duplicateBatch) throw new ConflictException(`批次号 ${batchNo} 已存在，请更换后重试`);
+      }
+
       // 创建批次
       const [batch] = await tx.insert(productBatchTable).values({
         batchNo,
         productId: detail.productId,
         inboundOrderId: order.id,
+        inboundDate: data.inboundDate,
         quantity: detail.quantity,
         weight: detail.weight,
       }).returning({ id: productBatchTable.id });
@@ -501,7 +526,8 @@ export class InboundService {
         stockWeight: productTable.stockWeight,
       })
       .from(productTable)
-      .where(eq(productTable.id, params.productId));
+      .where(eq(productTable.id, params.productId))
+      .for('update');
 
     if (!productRecord) {
       throw new BadRequestException('产品不存在');
@@ -549,22 +575,37 @@ export class InboundService {
       return { canUndo: false, reason: '普通操作员只能撤销自己创建的入库单' };
     }
 
-    // 检查是否有后续的出库操作
+    // 只检查本入库单创建的批次是否仍完整可用。历史实现查询产品级库存流水，
+    // 即使后续出库已经撤销、库存已经恢复，也会永久阻止撤销这张入库单。
     for (const detail of order.details) {
-      const outboundRecords = await this.db
-        .select({ id: inventoryRecordTable.id })
-        .from(inventoryRecordTable)
+      const batchStocks = await this.db
+        .select({
+          batchNo: productBatchTable.batchNo,
+          quantity: productBatchTable.quantity,
+          weight: productBatchTable.weight,
+          quantityAvailable: productBatchStockTable.quantityAvailable,
+          weightAvailable: productBatchStockTable.weightAvailable,
+          lockedQuantity: productBatchStockTable.lockedQuantity,
+          lockedWeight: productBatchStockTable.lockedWeight,
+        })
+        .from(productBatchTable)
+        .leftJoin(productBatchStockTable, eq(productBatchStockTable.batchId, productBatchTable.id))
         .where(and(
-          eq(inventoryRecordTable.productId, detail.productId),
-          eq(inventoryRecordTable.changeType, 'outbound'),
-          sql`${inventoryRecordTable.createdAt} > ${order.createdAt}`,
-        ))
-        .limit(1);
+          eq(productBatchTable.inboundOrderId, id),
+          eq(productBatchTable.productId, detail.productId),
+        ));
 
-      if (outboundRecords.length > 0) {
-        return { 
+      const batchChanged = batchStocks.some(batch =>
+        batch.quantityAvailable === null
+        || batch.weightAvailable === null
+        || batch.quantityAvailable !== batch.quantity
+        || Math.abs(batch.weightAvailable - (batch.weight || 0)) > 1e-6
+        || (batch.lockedQuantity || 0) > 0
+        || (batch.lockedWeight || 0) > 1e-6);
+      if (batchChanged || batchStocks.length === 0) {
+        return {
           canUndo: false, 
-          reason: `产品 ${detail.productName} 已有后续出库记录，无法撤销` 
+          reason: `产品 ${detail.productName} 的入库批次已被使用或调整，无法撤销`,
         };
       }
 
@@ -731,6 +772,10 @@ export class InboundService {
         .from(productBatchTable)
         .where(eq(productBatchTable.inboundOrderId, id));
       for (const batch of batches) {
+        // 已撤销出库仍会保留批次分配历史；批次已恢复完整且当前入库也撤销时，
+        // 先移除这些分配引用，避免外键阻止清理无效入库批次。
+        await tx.delete(outboundBatchDetailTable)
+          .where(eq(outboundBatchDetailTable.batchId, batch.id));
         await tx.delete(productBatchStockTable)
           .where(eq(productBatchStockTable.batchId, batch.id));
       }
@@ -834,7 +879,7 @@ export class InboundService {
 
   private isValidInboundImage(value: unknown): value is string {
     if (typeof value !== 'string' || value.length > 2_800_000) return false;
-    const match = /^data:image\/(?:png|jpe?g|webp|gif|bmp|tiff|x-icon);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(value);
+    const match = /^data:image\/(?:png|jpe?g|webp|gif|bmp|tiff|x-icon|vnd\.microsoft\.icon);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(value);
     if (!match) return false;
     const bytes = Buffer.from(match[1], 'base64');
     return bytes.length > 0 && bytes.length <= 2 * 1024 * 1024;

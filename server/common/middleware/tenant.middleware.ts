@@ -23,9 +23,13 @@ export class TenantMiddleware implements NestMiddleware {
 
   async use(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
+      // Nest/Express 在中间件匹配过程中可能重写 req.path（例如只剩
+      // `/customers`），因此安全边界必须使用未被路由层截断的原始 URL。
+      // 否则漏传租户头的 `/api/*` 请求会被误判为前端页面并落到主库。
+      const requestPath = this.getRequestPath(req);
       // 登录和健康检查与租户无关。即使浏览器残留了上一会话的组织头，
       // 也不能让失效/损坏的租户配置阻断用户重新登录。
-      if (req.path === '/api/auth/login' || req.path === '/api/auth/register' || req.path.startsWith('/api/health')) {
+      if (requestPath === '/api/auth/login' || requestPath === '/api/auth/register' || requestPath.startsWith('/api/health')) {
         return next();
       }
       // 1. 从请求头获取组织编码
@@ -33,11 +37,11 @@ export class TenantMiddleware implements NestMiddleware {
 
       if (!orgCode) {
         // 如果是公开路由（如登录、组织列表），允许继续
-        if (this.isPublicRoute(req.path)) {
+        if (this.isPublicRoute(requestPath)) {
           return next();
         }
         // 如果是前端页面路由（非API路径），允许继续
-        if (!req.path.startsWith('/api/')) {
+        if (!requestPath.startsWith('/api/')) {
           return next();
         }
         throw new UnauthorizedException('请先选择组织');
@@ -49,7 +53,7 @@ export class TenantMiddleware implements NestMiddleware {
       const orgId = await this.getOrgId(orgCode, this.masterDb);
       if (!orgId) {
         // 如果组织不存在，但访问的是公开路由则允许继续
-        if (this.isPublicRoute(req.path)) {
+        if (this.isPublicRoute(requestPath)) {
           return next();
         }
         throw new UnauthorizedException(`Organization '${orgCode}' not found`);
@@ -61,7 +65,7 @@ export class TenantMiddleware implements NestMiddleware {
         const membership = await this.getUserOrgMembership(userId, orgCode, this.masterDb);
         if (!membership) {
           // 如果用户没有权限，但访问的是公开路由则允许继续
-          if (this.isPublicRoute(req.path)) {
+          if (this.isPublicRoute(requestPath)) {
             return next();
           }
           throw new ForbiddenException('Access denied for this organization');
@@ -89,6 +93,12 @@ export class TenantMiddleware implements NestMiddleware {
       this.logger.error('Tenant middleware error:', error instanceof Error ? error.message : String(error));
       next(error);
     }
+  }
+
+  private getRequestPath(req: Request): string {
+    const raw = req.originalUrl || req.url || req.path || '/';
+    const withoutQuery = raw.split('?')[0] || '/';
+    return withoutQuery.startsWith('/') ? withoutQuery : `/${withoutQuery}`;
   }
 
   /**
@@ -176,9 +186,9 @@ export class TenantMiddleware implements NestMiddleware {
       '/api/tenant/my-organizations',
       '/api/tenant/organizations',
       '/api/tenant/join',
-      '/api/auth/login',
-      '/api/auth/register',
-      '/api/auth/callback',
+      // 账号资料、平台账号管理和登录都位于主库；它们仍由 AuthGuard 和
+      // 平台角色校验保护，但不能要求用户先选择组织。
+      '/api/auth',
       '/api/health',
       '/api/invites',
     ];

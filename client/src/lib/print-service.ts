@@ -1,7 +1,6 @@
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import { toast } from 'sonner';
-import { triggerPrint } from './excel-export';
 
 export type PrinterMode = 'browser' | 'network' | 'bluetooth';
 
@@ -38,6 +37,62 @@ function getPrintableElement(elementId: string): HTMLElement {
   const element = document.getElementById(elementId);
   if (!element) throw new Error(`未找到打印区域：${elementId}`);
   return element;
+}
+
+async function browserPrint(element: HTMLElement, title: string): Promise<void> {
+  // 使用同页隐藏 iframe，避免 window.open 在异步保存/弹窗环境中被浏览器拦截。
+  const frame = document.createElement('iframe');
+  frame.setAttribute('title', '打印文档');
+  frame.style.position = 'fixed';
+  frame.style.right = '0';
+  frame.style.bottom = '0';
+  frame.style.width = '1px';
+  frame.style.height = '1px';
+  frame.style.border = '0';
+  frame.style.opacity = '0';
+  document.body.appendChild(frame);
+
+  const cleanup = () => {
+    if (frame.parentNode) frame.parentNode.removeChild(frame);
+  };
+  try {
+    const documentForPrint = frame.contentDocument;
+    const windowForPrint = frame.contentWindow;
+    if (!documentForPrint || !windowForPrint) throw new Error('浏览器无法创建打印页面');
+    documentForPrint.open();
+    documentForPrint.write(`<!doctype html>
+      <html><head><meta charset="UTF-8"><title>${title.replace(/[<>]/g, '')}</title>
+      <style>
+        @page { margin: 10mm; }
+        * { box-sizing: border-box; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        html, body { margin: 0; padding: 0; color: #000; background: #fff; font-family: "SimSun", "Songti SC", "Microsoft YaHei", sans-serif; }
+        #print-preview-content { width: 100% !important; max-height: none !important; overflow: visible !important; background: #fff !important; color: #000 !important; }
+        table { width: 100%; border-collapse: collapse; }
+        thead { display: table-header-group; }
+        tfoot { display: table-footer-group; }
+        tr, figure { break-inside: avoid; page-break-inside: avoid; }
+        th, td { border-color: #666 !important; }
+        img { max-width: 100%; }
+        .no-print { display: none !important; }
+      </style></head><body>${element.outerHTML}</body></html>`);
+    documentForPrint.close();
+
+    const images = Array.from(documentForPrint.images);
+    await Promise.all(images.map(image => image.complete
+      ? Promise.resolve()
+      : new Promise<void>(resolve => {
+          image.onload = () => resolve();
+          image.onerror = () => resolve();
+          window.setTimeout(resolve, 3000);
+        })));
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    windowForPrint.focus();
+    windowForPrint.print();
+    window.setTimeout(cleanup, 1500);
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
 }
 
 async function networkPrint(element: HTMLElement, url: string, title: string): Promise<void> {
@@ -85,13 +140,13 @@ async function bluetoothPrint(element: HTMLElement, config: PrinterConfig): Prom
 
 export async function smartPrint(elementId: string, title = '单据打印'): Promise<void> {
   const config = getPrinterConfig();
-  if (config.mode === 'browser') {
-    triggerPrint(elementId);
-    return;
-  }
-
-  const element = getPrintableElement(elementId);
   try {
+    const element = getPrintableElement(elementId);
+    if (config.mode === 'browser') {
+      await browserPrint(element, title);
+      toast.success('已打开系统打印窗口；如打印机不可用，可改用“导出PDF”');
+      return;
+    }
     if (config.mode === 'network') await networkPrint(element, config.networkUrl, title);
     else await bluetoothPrint(element, config);
     toast.success(`${config.mode === 'network' ? '网络' : '蓝牙'}打印任务已发送`);

@@ -77,6 +77,7 @@ export interface IInboundDetail {
   material: string;
   techRequirement: string;
   urgent: boolean;
+  attachments?: string[];
 }
 
 // ========== 撤销检查类型 ==========
@@ -184,7 +185,8 @@ export interface IOutboundDetail {
   weight: number;
   amount: number;
   batchNo: string;
-  inboundDate: string;
+  // 服务端按实际扣减批次回填；新建出库请求不应由前端猜测批次日期。
+  inboundDate?: string;
 }
 
 // ========== 对账单类型 ==========

@@ -33,9 +33,11 @@ export class OutboundController {
     @Query('pageSize') pageSize?: string,
   ) {
     // 验证 status 参数
-    const validStatus = status && ['active', 'cancelled', 'all'].includes(status)
-      ? status as 'active' | 'cancelled' | 'all'
-      : 'all';
+    const statuses = ['active', 'pending_reconciliation', 'reconciled', 'cancelled', 'all'] as const;
+    if (status && !(statuses as readonly string[]).includes(status)) {
+      throw new BadRequestException('status 必须为 active、pending_reconciliation、reconciled、cancelled 或 all');
+    }
+    const validStatus = (status || 'all') as typeof statuses[number];
     
     const pagination = parsePagination(page, pageSize, {
       page: PAGINATION.DEFAULT_PAGE, pageSize: PAGINATION.DEFAULT_PAGE_SIZE, maxPageSize: PAGINATION.MAX_PAGE_SIZE,

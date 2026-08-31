@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { CapabilityService } from '@lark-apaas/fullstack-nestjs-core';
 import { Inject } from '@nestjs/common';
+import { isVoiceResultComplete, normalizeVoiceFields, parseVoiceLocally, type ParsedVoiceFields } from './voice-parser';
 
 export interface ParseVoiceInputDto {
   text: string;
@@ -45,6 +46,15 @@ export class VoiceService {
         error: '输入文本为空',
       };
     }
+    if (text.length > 1000) {
+      return { success: false, rawText: text, error: '语音文字不能超过1000字' };
+    }
+
+    const localResult = parseVoiceLocally(text);
+    // 常见现场话术在本地即可稳定解析，避免网络或 AI 服务波动阻塞收货。
+    if (isVoiceResultComplete(localResult)) {
+      return { success: true, data: localResult, rawText: text };
+    }
 
     try {
       // 使用智能写作插件进行语义解析
@@ -57,7 +67,8 @@ export class VoiceService {
       }
 
       // 调用AI进行解析
-      const result = await this.callAIForParsing(prompt);
+      const aiResult = await this.callAIForParsing(prompt);
+      const result = { ...localResult, ...Object.fromEntries(Object.entries(aiResult).filter(([, value]) => value !== undefined)) };
 
       return {
         success: true,
@@ -66,6 +77,13 @@ export class VoiceService {
       };
     } catch (error) {
       this.logger.error('语音解析失败:', error);
+      if (Object.values(localResult).some(value => value !== undefined)) {
+        return {
+          success: true,
+          data: localResult,
+          rawText: text,
+        };
+      }
       return {
         success: false,
         rawText: text,
@@ -117,7 +135,7 @@ export class VoiceService {
     return prompt;
   }
 
-  private async callAIForParsing(prompt: string): Promise<Record<string, unknown>> {
+  private async callAIForParsing(prompt: string): Promise<ParsedVoiceFields> {
     this.logger.log(`开始调用AI插件，prompt前50字符: ${prompt.substring(0, 50)}...`);
 
     if (!prompt || prompt.trim().length === 0) {
@@ -152,31 +170,21 @@ export class VoiceService {
 
       const parsed = JSON.parse(jsonMatch[0]);
 
-      // 转换数字字段
-      return {
+      return normalizeVoiceFields({
         productName: parsed.productName || undefined,
-        quantity: this.parseNumber(parsed.quantity),
-        weight: this.parseNumber(parsed.weight),
+        quantity: parsed.quantity,
+        weight: parsed.weight,
         unit: parsed.unit || undefined,
-        unitPrice: this.parseNumber(parsed.unitPrice),
+        unitPrice: parsed.unitPrice,
         material: parsed.material || undefined,
         process: parsed.process || undefined,
         customerName: parsed.customerName || undefined,
         remark: parsed.remark || undefined,
-      };
+      });
     } catch (error) {
       this.logger.error('AI解析失败:', error);
       throw error;
     }
   }
 
-  private parseNumber(value: unknown): number | undefined {
-    if (value === null || value === undefined) return undefined;
-    if (typeof value === 'number') return value;
-    if (typeof value === 'string') {
-      const parsed = parseFloat(value);
-      return isNaN(parsed) ? undefined : parsed;
-    }
-    return undefined;
-  }
 }

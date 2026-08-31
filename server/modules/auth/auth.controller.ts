@@ -15,7 +15,7 @@ export class AuthController {
 
   @Public()
   @Post('register')
-  register(@Body() body: { username: string; password: string; name: string }) {
+  register(@Body() body: { username: string; password: string; name: string; deviceName?: string }) {
     return this.auth.register(body);
   }
 

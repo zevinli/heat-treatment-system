@@ -41,6 +41,7 @@ import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { changeMyPassword, getMyProfile, updateMyProfile } from '@/api';
 import { useData } from '@/data/DataContext';
+import { getCurrentUser, setCurrentUser } from '@/lib/auth-session';
 
 // 用户信息类型
 interface UserProfile {
@@ -186,8 +187,8 @@ const PasswordForm: React.FC = () => {
       return;
     }
     
-    if (newPassword.length < 8) {
-      toast.error('新密码长度至少8位');
+    if (newPassword.length < 8 || newPassword.length > 128) {
+      toast.error('新密码长度需为8-128位');
       return;
     }
     
@@ -356,11 +357,9 @@ const ProfilePage: React.FC = () => {
       const next = { ...editedProfile, name: saved.name };
       setProfile(next);
       setEditedProfile(next);
-      const stored = localStorage.getItem('__global_heat_current_user');
-      if (stored) {
-        try {
-          localStorage.setItem('__global_heat_current_user', JSON.stringify({ ...JSON.parse(stored), name: saved.name, department: saved.department || '' }));
-        } catch { /* 忽略旧缓存格式 */ }
+      const currentUser = getCurrentUser();
+      if (currentUser) {
+        setCurrentUser({ ...currentUser, name: saved.name, department: saved.department || '' });
       }
       setIsEditing(false);
       toast.success('个人资料保存成功');

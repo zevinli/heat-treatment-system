@@ -394,7 +394,7 @@ const manualContent: Record<string, { title: string; content: React.ReactNode }>
           {[
             { icon: LayoutDashboard, title: '工作台', desc: '业务概览、快捷入口、风险预警、业务完成度统计' },
             { icon: Package, title: '来货登记', desc: '三步完成入库，自动生成入库单号，支持打印流程卡' },
-            { icon: Truck, title: '快速发货', desc: '智能筛选可发产品，灵活分批发货，支持关单平账' },
+            { icon: Truck, title: '快速发货', desc: '智能筛选可发产品，灵活分批发货，按实际数量扣减库存' },
             { icon: Box, title: '库存管理', desc: '实时库存监控，支持手动调整，超期预警提醒' },
             { icon: ClipboardCheck, title: '智能对账', desc: '按月汇总出库数据，自动计算应收金额，回款跟踪' },
             { icon: BarChart3, title: '数据统计', desc: '综合报表、客户分析、库存分析、产品分析、财务分析' },
@@ -423,7 +423,7 @@ const manualContent: Record<string, { title: string; content: React.ReactNode }>
             { title: '三步闭环流程', desc: '来货/发货均采用"选客户→选产品→录数据"三步完成，操作简单高效' },
             { title: '智能单号生成', desc: '入库单号（RK开头）、出库单号（CK开头）自动生成，规则统一' },
             { title: '实时库存联动', desc: '入库自动增加库存，出库自动扣减，数据实时同步' },
-            { title: '灵活分批处理', desc: '支持部分发货，关单功能可平账处理尾数' },
+            { title: '灵活分批处理', desc: '支持部分发货和本行完成标记，未出库库存继续保留' },
             { title: '多维度筛选', desc: '支持按客户、产品、材质、状态等多条件组合筛选' },
             { title: '现场打印支持', desc: '流程卡、送货单可直接打印，支持模板自定义' },
             { title: '数据导出能力', desc: '各模块均支持导出Excel，方便二次处理' },
@@ -597,7 +597,7 @@ const manualContent: Record<string, { title: string; content: React.ReactNode }>
               <ArrowRight className="h-5 w-5 text-blue-500 mt-0.5" />
               <div>
                 <span className="font-medium text-foreground">灵活分批处理：</span>
-                <span className="text-muted-foreground">支持部分发货，关单功能可平账处理尾数，适应各种业务场景</span>
+                <span className="text-muted-foreground">支持部分发货和完成标记，系统只扣减实际出库量，剩余库存继续保留</span>
               </div>
             </div>
             <div className="flex items-start gap-3">
@@ -1796,7 +1796,7 @@ manualContent['outbound'] = {
   title: '快速发货',
   content: (
     <div className="space-y-6">
-      <p className="text-muted-foreground">快速发货用于处理客户产品的出库发货，支持智能筛选可发产品、灵活分批发货、关单平账等功能。</p>
+      <p className="text-muted-foreground">快速发货用于处理客户产品的出库发货，支持智能筛选可发产品、灵活分批发货和本行完成标记。</p>
 
       <ScreenshotPlaceholder label="快速发货页面示意图" />
 
@@ -1863,7 +1863,7 @@ manualContent['outbound'] = {
             </ul>
             <div className="flex gap-2 mt-3">
               <Button size="sm" disabled>保存发货（界面示意）</Button>
-              <Button size="sm" variant="outline" disabled>关单平账（界面示意）</Button>
+              <Button size="sm" variant="outline" disabled>标记本行完成（界面示意）</Button>
             </div>
           </div>
         </div>
@@ -1871,7 +1871,7 @@ manualContent['outbound'] = {
 
       <h4 className="font-semibold text-lg mt-6 flex items-center gap-2">
         <CheckCircle className="h-5 w-5 text-blue-500" />
-        正常发货 vs 关单
+        正常发货 vs 本行完成标记
       </h4>
 
       <div className="grid md:grid-cols-2 gap-4">
@@ -1890,12 +1890,12 @@ manualContent['outbound'] = {
         <div className="border rounded-lg p-4">
           <h5 className="font-semibold text-foreground mb-2 flex items-center gap-2">
             <CheckSquare className="h-5 w-5 text-amber-500" />
-            关单平账
+            本行完成标记
           </h5>
-          <p className="text-sm text-muted-foreground">将该产品库存清零，用于处理尾数或结束批次。</p>
+          <p className="text-sm text-muted-foreground">标记该产品本次业务已完成，但仍只扣减实际填写的出库数量和重量。</p>
           <div className="mt-2 text-sm">
             <span className="text-amber-600 font-medium">示例：</span>
-            <span className="text-muted-foreground">库存剩3件尾数不再发货，关单后库存变为0</span>
+            <span className="text-muted-foreground">库存100件，实际发货97件并标记完成，剩余3件仍保留在库存中；如需盘亏，请到库存管理发起调整</span>
           </div>
         </div>
       </div>
